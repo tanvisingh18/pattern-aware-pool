@@ -28,6 +28,7 @@ public final class RoutingDecision {
         SCORE,
         HOT_HOUR,
         LIVE_CLUSTER,
+        RESET_PREDICTED,
         NONE
     }
 

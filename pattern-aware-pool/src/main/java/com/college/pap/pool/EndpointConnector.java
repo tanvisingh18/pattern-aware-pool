@@ -14,6 +14,7 @@ public interface EndpointConnector {
 
     final class ConnectionFailedException extends Exception {
         private final FailureType failureType;
+        private long simulatedLatencyMs;
 
         public ConnectionFailedException(String message, FailureType failureType) {
             super(message);
@@ -22,6 +23,14 @@ public interface EndpointConnector {
 
         public FailureType failureType() {
             return failureType;
+        }
+
+        public long simulatedLatencyMs() {
+            return simulatedLatencyMs;
+        }
+
+        public void setSimulatedLatencyMs(long simulatedLatencyMs) {
+            this.simulatedLatencyMs = Math.max(0, simulatedLatencyMs);
         }
     }
 }

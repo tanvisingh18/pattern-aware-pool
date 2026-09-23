@@ -1,6 +1,7 @@
 package com.college.pap.pool;
 
 import com.college.pap.analysis.PatternAnalyzer;
+import com.college.pap.analysis.ResetPatternDetector;
 import com.college.pap.history.FailureHistoryStore;
 import com.college.pap.model.AttemptOutcome;
 import com.college.pap.model.ConnectionAttempt;
@@ -26,18 +27,29 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Orchestrator: Layer 1 memory + Layer 2 routing + Layer 3 pre-warming + real idle pooling.
  * Connections are reused via {@link IdleConnectionPool}; {@link PapConnection#close()} returns them.
+ *
+ * Modes: predictive, reactive baseline, and circuit-breaker baseline.
  */
 public final class ConnectionPool implements AutoCloseable {
+
+    public enum Mode {
+        PREDICTIVE,
+        REACTIVE,
+        CIRCUIT_BREAKER
+    }
 
     private final EndpointRegistry registry;
     private final Map<EndpointId, EndpointConnector> connectors;
     private final Map<EndpointId, IdleConnectionPool> idlePools = new ConcurrentHashMap<>();
     private final FailureHistoryStore historyStore;
     private final PatternAnalyzer analyzer;
+    private final ResetPatternDetector resetDetector;
     private final PredictionEngine predictionEngine;
     private final RoutingDecider routingDecider;
     private final WarmPool warmPool;
@@ -47,29 +59,39 @@ public final class ConnectionPool implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     private final MonitoringThreadFactory threadFactory;
     private final Clock clock;
-    private final boolean predictiveMode;
+    private final Mode mode;
     private final ConnectionValidator validator = new ConnectionValidator();
+
+    /** Circuit breaker: open after 3 consecutive primary failures for 60s, then half-open probe. */
+    private final AtomicInteger consecutivePrimaryFailures = new AtomicInteger();
+    private final AtomicReference<Instant> circuitOpenUntil = new AtomicReference<>();
+    private final AtomicReference<CircuitState> circuitState =
+            new AtomicReference<>(CircuitState.CLOSED);
+
+    private enum CircuitState { CLOSED, OPEN, HALF_OPEN }
 
     private ConnectionPool(
             EndpointRegistry registry,
             Map<EndpointId, EndpointConnector> connectors,
             PoolConfig config,
             Clock clock,
-            boolean predictiveMode,
+            Mode mode,
             boolean startBackground) {
         this.registry = Objects.requireNonNull(registry);
         this.connectors = Map.copyOf(connectors);
         this.config = Objects.requireNonNull(config);
         this.clock = Objects.requireNonNull(clock);
-        this.predictiveMode = predictiveMode;
+        this.mode = Objects.requireNonNull(mode);
 
         ZoneId zone = config.zoneId();
         this.historyStore = new FailureHistoryStore(config.historyCapacity());
         this.analyzer = new PatternAnalyzer(
                 historyStore, 0.35, 20, 2, zone);
+        this.resetDetector = new ResetPatternDetector();
         // LIVE config suppliers — RMI retune takes effect immediately.
         this.predictionEngine = new PredictionEngine(config, clock);
-        this.routingDecider = new RoutingDecider(registry, analyzer, predictionEngine, config);
+        this.routingDecider = new RoutingDecider(
+                registry, analyzer, predictionEngine, config, resetDetector);
         this.metrics = new PoolMetrics();
         this.threadFactory = new MonitoringThreadFactory("pap-monitoring", "pap-worker");
         this.scheduler = Executors.newScheduledThreadPool(3, threadFactory);
@@ -99,6 +121,7 @@ public final class ConnectionPool implements AutoCloseable {
                 config,
                 clock);
 
+        boolean predictiveMode = mode == Mode.PREDICTIVE;
         if (startBackground && predictiveMode) {
             scheduler.scheduleAtFixedRate(
                     this::backgroundTickSafe,
@@ -114,7 +137,16 @@ public final class ConnectionPool implements AutoCloseable {
             Map<EndpointId, EndpointConnector> connectors,
             PoolConfig config,
             Clock clock) {
-        return new ConnectionPool(registry, connectors, config, clock, true, true);
+        return new ConnectionPool(registry, connectors, config, clock, Mode.PREDICTIVE, true);
+    }
+
+    /** Predictive pool without wall-clock background threads (experiments drive ticks). */
+    public static ConnectionPool predictiveManual(
+            EndpointRegistry registry,
+            Map<EndpointId, EndpointConnector> connectors,
+            PoolConfig config,
+            Clock clock) {
+        return new ConnectionPool(registry, connectors, config, clock, Mode.PREDICTIVE, false);
     }
 
     public static ConnectionPool reactiveBaseline(
@@ -122,7 +154,15 @@ public final class ConnectionPool implements AutoCloseable {
             Map<EndpointId, EndpointConnector> connectors,
             PoolConfig config,
             Clock clock) {
-        return new ConnectionPool(registry, connectors, config, clock, false, false);
+        return new ConnectionPool(registry, connectors, config, clock, Mode.REACTIVE, false);
+    }
+
+    public static ConnectionPool circuitBreaker(
+            EndpointRegistry registry,
+            Map<EndpointId, EndpointConnector> connectors,
+            PoolConfig config,
+            Clock clock) {
+        return new ConnectionPool(registry, connectors, config, clock, Mode.CIRCUIT_BREAKER, false);
     }
 
     public PapConnection getConnection() throws EndpointConnector.ConnectionFailedException {
@@ -132,10 +172,11 @@ public final class ConnectionPool implements AutoCloseable {
     public PapConnection getConnection(EndpointId requested)
             throws EndpointConnector.ConnectionFailedException {
         long start = System.nanoTime();
-        if (!predictiveMode) {
-            return reactiveCheckout(requested, start);
-        }
-        return predictiveCheckout(requested, start);
+        return switch (mode) {
+            case PREDICTIVE -> predictiveCheckout(requested, start);
+            case CIRCUIT_BREAKER -> circuitBreakerCheckout(requested, start);
+            case REACTIVE -> reactiveCheckout(requested, start);
+        };
     }
 
     private PapConnection predictiveCheckout(EndpointId requested, long start)
@@ -163,8 +204,8 @@ public final class ConnectionPool implements AutoCloseable {
                     }
                     if (warm.isOpen()) {
                         warm.setRoutingDecision(decision);
-                        recordAttempt(selected, true, FailureType.NONE, start);
-                        metrics.recordCheckout(decision, true, true, elapsedMs(start));
+                        recordAttempt(selected, true, FailureType.NONE, start, 0);
+                        metrics.recordCheckout(decision, true, true, elapsedMs(start, 0));
                         return warm;
                     }
                 } else {
@@ -176,7 +217,7 @@ public final class ConnectionPool implements AutoCloseable {
         try {
             PapConnection connection = acquireAndRecord(selected, start);
             connection.setRoutingDecision(decision);
-            metrics.recordCheckout(decision, true, false, elapsedMs(start));
+            metrics.recordCheckout(decision, true, false, connection.lastSimulatedLatencyMs());
             return connection;
         } catch (EndpointConnector.ConnectionFailedException firstFailure) {
             for (EndpointId candidate : registry.all()) {
@@ -196,14 +237,112 @@ public final class ConnectionPool implements AutoCloseable {
                             score,
                             scores);
                     connection.setRoutingDecision(fallback);
-                    metrics.recordCheckout(fallback, true, false, elapsedMs(start));
+                    metrics.recordCheckout(fallback, true, false, connection.lastSimulatedLatencyMs());
                     return connection;
                 } catch (EndpointConnector.ConnectionFailedException ignored) {
                     // try next
                 }
             }
-            metrics.recordCheckout(decision, false, false, elapsedMs(start));
+            metrics.recordCheckout(decision, false, false,
+                    firstFailure.simulatedLatencyMs() > 0
+                            ? firstFailure.simulatedLatencyMs()
+                            : elapsedMs(start, 0));
             throw firstFailure;
+        }
+    }
+
+    private PapConnection circuitBreakerCheckout(EndpointId requested, long start)
+            throws EndpointConnector.ConnectionFailedException {
+        Instant at = clock.instant();
+        ZoneId zone = config.zoneId();
+        refreshCircuitState(at);
+
+        CircuitState state = circuitState.get();
+        boolean tryPrimary = state == CircuitState.CLOSED
+                || state == CircuitState.HALF_OPEN;
+
+        if (tryPrimary) {
+            try {
+                PapConnection connection = acquireAndRecord(requested, start);
+                onCircuitPrimarySuccess();
+                RiskScore score = new RiskScore(requested, 0.1, 0, 0, 0, at.atZone(zone).getHour());
+                RoutingDecision decision = new RoutingDecision(
+                        requested,
+                        requested,
+                        RoutingDecision.Reason.PRIMARY_OK,
+                        RoutingDecision.Trigger.NONE,
+                        score,
+                        Map.of(requested, score));
+                connection.setRoutingDecision(decision);
+                metrics.recordCheckout(decision, true, false, connection.lastSimulatedLatencyMs());
+                return connection;
+            } catch (EndpointConnector.ConnectionFailedException e) {
+                onCircuitPrimaryFailure(at);
+                // fall through to backup
+            }
+        }
+
+        EndpointId backup = registry.firstBackup().orElse(null);
+        if (backup == null) {
+            RiskScore failScore = new RiskScore(
+                    requested, 1.0, 1, 1, 1, at.atZone(zone).getHour());
+            RoutingDecision failed = new RoutingDecision(
+                    requested, requested, RoutingDecision.Reason.DEGRADED_MODE,
+                    RoutingDecision.Trigger.SCORE, failScore, Map.of(requested, failScore));
+            metrics.recordCheckout(failed, false, false, elapsedMs(start, 0));
+            throw new EndpointConnector.ConnectionFailedException(
+                    "circuit open, no backup", FailureType.UNKNOWN);
+        }
+
+        try {
+            PapConnection connection = acquireAndRecord(backup, start);
+            RiskScore score = new RiskScore(backup, 0.2, 0, 0, 0, at.atZone(zone).getHour());
+            RoutingDecision decision = new RoutingDecision(
+                    requested,
+                    backup,
+                    RoutingDecision.Reason.DEGRADED_MODE,
+                    RoutingDecision.Trigger.NONE,
+                    score,
+                    Map.of(backup, score));
+            connection.setRoutingDecision(decision);
+            metrics.recordCheckout(decision, true, false, connection.lastSimulatedLatencyMs());
+            return connection;
+        } catch (EndpointConnector.ConnectionFailedException e) {
+            RiskScore failScore = new RiskScore(
+                    backup, 1.0, 1, 1, 1, at.atZone(zone).getHour());
+            RoutingDecision failed = new RoutingDecision(
+                    requested, backup, RoutingDecision.Reason.DEGRADED_MODE,
+                    RoutingDecision.Trigger.SCORE, failScore, Map.of(backup, failScore));
+            metrics.recordCheckout(failed, false, false,
+                    e.simulatedLatencyMs() > 0 ? e.simulatedLatencyMs() : elapsedMs(start, 0));
+            throw e;
+        }
+    }
+
+    private void refreshCircuitState(Instant at) {
+        Instant until = circuitOpenUntil.get();
+        if (circuitState.get() == CircuitState.OPEN && until != null && !at.isBefore(until)) {
+            circuitState.set(CircuitState.HALF_OPEN);
+        }
+    }
+
+    private void onCircuitPrimarySuccess() {
+        consecutivePrimaryFailures.set(0);
+        circuitState.set(CircuitState.CLOSED);
+        circuitOpenUntil.set(null);
+    }
+
+    private void onCircuitPrimaryFailure(Instant at) {
+        if (circuitState.get() == CircuitState.HALF_OPEN) {
+            circuitState.set(CircuitState.OPEN);
+            circuitOpenUntil.set(at.plusSeconds(60));
+            consecutivePrimaryFailures.set(3);
+            return;
+        }
+        int fails = consecutivePrimaryFailures.incrementAndGet();
+        if (fails >= 3) {
+            circuitState.set(CircuitState.OPEN);
+            circuitOpenUntil.set(at.plusSeconds(60));
         }
     }
 
@@ -232,7 +371,7 @@ public final class ConnectionPool implements AutoCloseable {
                         score,
                         scores);
                 connection.setRoutingDecision(decision);
-                metrics.recordCheckout(decision, true, false, elapsedMs(start));
+                metrics.recordCheckout(decision, true, false, connection.lastSimulatedLatencyMs());
                 return connection;
             } catch (EndpointConnector.ConnectionFailedException e) {
                 last = e;
@@ -248,7 +387,10 @@ public final class ConnectionPool implements AutoCloseable {
                 RoutingDecision.Trigger.SCORE,
                 failScore,
                 Map.of(requested, failScore));
-        metrics.recordCheckout(failed, false, false, elapsedMs(start));
+        metrics.recordCheckout(failed, false, false,
+                last != null && last.simulatedLatencyMs() > 0
+                        ? last.simulatedLatencyMs()
+                        : elapsedMs(start, 0));
         throw last == null
                 ? new EndpointConnector.ConnectionFailedException("no endpoints", FailureType.UNKNOWN)
                 : last;
@@ -286,38 +428,60 @@ public final class ConnectionPool implements AutoCloseable {
             PapConnection connection = idle.acquire();
             if (idle.physicalConnects() > beforePhysical) {
                 metrics.recordPhysicalConnect();
+                EndpointConnector connector = connectors.get(endpointId);
+                if (connector instanceof FlakyEndpointConnector flaky) {
+                    connection.setLastSimulatedLatencyMs(flaky.lastSimulatedLatencyMs());
+                }
             }
             if (idle.reuseHits() > beforeReuse) {
                 metrics.recordReuseHit();
             }
-            recordAttempt(endpointId, true, FailureType.NONE, startNanos);
+            recordAttempt(endpointId, true, FailureType.NONE, startNanos,
+                    connection.lastSimulatedLatencyMs());
             return connection;
         } catch (EndpointConnector.ConnectionFailedException e) {
-            recordAttempt(endpointId, false, e.failureType(), startNanos);
+            long sim = 0;
+            EndpointConnector connector = connectors.get(endpointId);
+            if (connector instanceof FlakyEndpointConnector flaky) {
+                sim = flaky.lastSimulatedLatencyMs();
+                e.setSimulatedLatencyMs(sim);
+            }
+            recordAttempt(endpointId, false, e.failureType(), startNanos, sim);
             analyzer.analyze(endpointId);
             metrics.recordConnectFailure();
             throw e;
         }
     }
 
-    private void recordAttempt(EndpointId endpointId, boolean success, FailureType type, long startNanos) {
+    private void recordAttempt(
+            EndpointId endpointId,
+            boolean success,
+            FailureType type,
+            long startNanos,
+            long simulatedLatencyMs) {
         Instant started = clock.instant();
-        long duration = Math.max(0, elapsedMs(startNanos));
+        long duration = simulatedLatencyMs > 0
+                ? simulatedLatencyMs
+                : Math.max(0, elapsedMs(startNanos, 0));
         ConnectionAttempt attempt = success
                 ? ConnectionAttempt.success(endpointId, started, duration)
                 : ConnectionAttempt.failure(endpointId, started, AttemptOutcome.FAILURE, type, duration);
         historyStore.record(attempt);
         analyzer.observe(attempt);
+        resetDetector.observe(attempt);
     }
 
-    private static long elapsedMs(long startNanos) {
+    private static long elapsedMs(long startNanos, long simulatedFallback) {
+        if (simulatedFallback > 0) {
+            return simulatedFallback;
+        }
         return (System.nanoTime() - startNanos) / 1_000_000L;
     }
 
     /** Analyzer + pre-warmer tick (including recovery probes). */
     public void backgroundTick() {
         analyzer.analyzeAll();
-        if (predictiveMode) {
+        if (mode == Mode.PREDICTIVE) {
             preWarmer.tick();
         }
     }
@@ -336,6 +500,10 @@ public final class ConnectionPool implements AutoCloseable {
 
     public PatternAnalyzer analyzer() {
         return analyzer;
+    }
+
+    public ResetPatternDetector resetDetector() {
+        return resetDetector;
     }
 
     public RoutingDecider routingDecider() {
@@ -363,7 +531,11 @@ public final class ConnectionPool implements AutoCloseable {
     }
 
     public boolean predictiveMode() {
-        return predictiveMode;
+        return mode == Mode.PREDICTIVE;
+    }
+
+    public Mode mode() {
+        return mode;
     }
 
     public EndpointRegistry registry() {

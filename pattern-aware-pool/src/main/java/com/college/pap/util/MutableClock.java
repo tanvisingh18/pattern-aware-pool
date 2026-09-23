@@ -23,6 +23,14 @@ public final class MutableClock extends Clock {
         this.instant.set(instant);
     }
 
+    public void advance(java.time.Duration duration) {
+        instant.updateAndGet(i -> i.plus(duration));
+    }
+
+    public void advanceSeconds(long seconds) {
+        advance(java.time.Duration.ofSeconds(seconds));
+    }
+
     @Override
     public ZoneId getZone() {
         return zone;

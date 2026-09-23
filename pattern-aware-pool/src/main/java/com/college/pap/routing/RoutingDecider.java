@@ -1,6 +1,7 @@
 package com.college.pap.routing;
 
 import com.college.pap.analysis.PatternAnalyzer;
+import com.college.pap.analysis.ResetPatternDetector;
 import com.college.pap.model.EndpointId;
 import com.college.pap.model.EndpointRiskProfile;
 import com.college.pap.pool.PoolConfig;
@@ -14,13 +15,14 @@ import java.util.Objects;
 import java.util.function.Supplier;
 
 /**
- * Layer 2 — Predictive rerouting with LIVE threshold + hot-hour + live-cluster rules.
+ * Layer 2 — Predictive rerouting with LIVE threshold + hot-hour + live-cluster + reset rules.
  *
  * Failover if ANY of:
  * <ul>
  *   <li>weighted risk ≥ highRiskThreshold</li>
  *   <li>hot hour: samples ≥ minSamples AND failureRate ≥ hotHourThreshold</li>
  *   <li>live cluster: currentRunLength ≥ clusterAvoidRun</li>
+ *   <li>reset predicted: success streak ≥ detected period P − 1</li>
  * </ul>
  */
 public final class RoutingDecider {
@@ -29,12 +31,13 @@ public final class RoutingDecider {
     private final PatternAnalyzer analyzer;
     private final PredictionEngine predictionEngine;
     private final Supplier<PoolConfig> configSupplier;
+    private final ResetPatternDetector resetDetector;
 
     public RoutingDecider(
             EndpointRegistry registry,
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine) {
-        this(registry, analyzer, predictionEngine, new PoolConfig());
+        this(registry, analyzer, predictionEngine, new PoolConfig(), new ResetPatternDetector());
     }
 
     public RoutingDecider(
@@ -42,7 +45,8 @@ public final class RoutingDecider {
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine,
             double highRiskThreshold) {
-        this(registry, analyzer, predictionEngine, configWithThreshold(highRiskThreshold));
+        this(registry, analyzer, predictionEngine, configWithThreshold(highRiskThreshold),
+                new ResetPatternDetector());
     }
 
     public RoutingDecider(
@@ -50,11 +54,21 @@ public final class RoutingDecider {
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine,
             PoolConfig config) {
+        this(registry, analyzer, predictionEngine, config, new ResetPatternDetector());
+    }
+
+    public RoutingDecider(
+            EndpointRegistry registry,
+            PatternAnalyzer analyzer,
+            PredictionEngine predictionEngine,
+            PoolConfig config,
+            ResetPatternDetector resetDetector) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.analyzer = Objects.requireNonNull(analyzer, "analyzer");
         this.predictionEngine = Objects.requireNonNull(predictionEngine, "predictionEngine");
         Objects.requireNonNull(config, "config");
         this.configSupplier = () -> config;
+        this.resetDetector = Objects.requireNonNull(resetDetector, "resetDetector");
     }
 
     private static PoolConfig configWithThreshold(double highRiskThreshold) {
@@ -69,6 +83,10 @@ public final class RoutingDecider {
 
     public PoolConfig config() {
         return configSupplier.get();
+    }
+
+    public ResetPatternDetector resetDetector() {
+        return resetDetector;
     }
 
     public RoutingDecision decide() {
@@ -101,7 +119,8 @@ public final class RoutingDecider {
                     scores);
         }
 
-        RoutingDecision.Trigger trigger = classifyTrigger(requestedProfile, requestedScore, config);
+        RoutingDecision.Trigger trigger = classifyTrigger(
+                requested, requestedProfile, requestedScore, config, resetDetector);
         boolean avoid = trigger != RoutingDecision.Trigger.NONE;
 
         if (!avoid) {
@@ -122,7 +141,8 @@ public final class RoutingDecider {
         for (EndpointId candidate : registry.all()) {
             RiskScore score = scores.get(candidate);
             EndpointRiskProfile profile = resolveProfile(candidate);
-            RoutingDecision.Trigger candidateTrigger = classifyTrigger(profile, score, config);
+            RoutingDecision.Trigger candidateTrigger = classifyTrigger(
+                    candidate, profile, score, config, resetDetector);
             boolean candidateAvoid = candidateTrigger != RoutingDecision.Trigger.NONE;
 
             boolean better = score.score() < leastBadScore.score()
@@ -161,12 +181,16 @@ public final class RoutingDecider {
     }
 
     /**
-     * Attribution order: HOT_HOUR → LIVE_CLUSTER → SCORE (first match wins).
+     * Attribution order: HOT_HOUR → LIVE_CLUSTER → RESET_PREDICTED → SCORE (first match wins).
      * Hot-hour is checked first so known bad windows report HOT_HOUR even when
      * the composite score is also elevated.
      */
     static RoutingDecision.Trigger classifyTrigger(
-            EndpointRiskProfile profile, RiskScore score, PoolConfig config) {
+            EndpointId endpointId,
+            EndpointRiskProfile profile,
+            RiskScore score,
+            PoolConfig config,
+            ResetPatternDetector resetDetector) {
         if (profile != null && HotHourRules.isHot(profile, score.hourOfDay(), config)) {
             return RoutingDecision.Trigger.HOT_HOUR;
         }
@@ -174,10 +198,20 @@ public final class RoutingDecider {
                 && profile.clusterState().currentRunLength() >= config.clusterAvoidRun()) {
             return RoutingDecision.Trigger.LIVE_CLUSTER;
         }
+        if (resetDetector != null && resetDetector.preferBackup(endpointId)) {
+            return RoutingDecision.Trigger.RESET_PREDICTED;
+        }
         if (score.isHighRisk(config.highRiskThreshold())) {
             return RoutingDecision.Trigger.SCORE;
         }
         return RoutingDecision.Trigger.NONE;
+    }
+
+    /** Backward-compatible helper used by older tests. */
+    static RoutingDecision.Trigger classifyTrigger(
+            EndpointRiskProfile profile, RiskScore score, PoolConfig config) {
+        EndpointId id = profile == null ? new EndpointId("unknown") : profile.endpointId();
+        return classifyTrigger(id, profile, score, config, new ResetPatternDetector());
     }
 
     private Map<EndpointId, RiskScore> scoreRegistered(Instant at) {

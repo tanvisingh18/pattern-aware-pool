@@ -25,6 +25,7 @@ public final class PapConnection implements AutoCloseable {
     private final boolean preWarmed;
     private volatile IdleConnectionPool owner;
     private volatile RoutingDecision routingDecision;
+    private volatile long lastSimulatedLatencyMs;
 
     public PapConnection(EndpointId endpointId, Object nativeHandle, Runnable onClose, boolean preWarmed) {
         this(endpointId, nativeHandle, onClose, preWarmed, null);
@@ -95,6 +96,15 @@ public final class PapConnection implements AutoCloseable {
 
     public Optional<RoutingDecision> routingDecision() {
         return Optional.ofNullable(routingDecision);
+    }
+
+    public void setLastSimulatedLatencyMs(long lastSimulatedLatencyMs) {
+        this.lastSimulatedLatencyMs = Math.max(0, lastSimulatedLatencyMs);
+    }
+
+    /** Simulated connect latency (experiments); 0 when not using a flaky simulator. */
+    public long lastSimulatedLatencyMs() {
+        return lastSimulatedLatencyMs;
     }
 
     public Optional<Connection> unwrapJdbc() {
