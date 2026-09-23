@@ -47,8 +47,12 @@ class RoutingDeciderTest {
         LocalDate day = LocalDate.of(2026, 7, 26);
         for (int i = 0; i < 20; i++) {
             Instant ts = day.atTime(9, i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.success(primary, ts, 5));
-            store.record(ConnectionAttempt.success(backup, ts, 5));
+            { ConnectionAttempt obs1 = ConnectionAttempt.success(primary, ts, 5);
+              store.record(obs1);
+              analyzer.observe(obs1); }
+            { ConnectionAttempt obs2 = ConnectionAttempt.success(backup, ts, 5);
+              store.record(obs2);
+              analyzer.observe(obs2); }
         }
         analyzer.analyzeAll();
 
@@ -65,17 +69,23 @@ class RoutingDeciderTest {
 
         for (int i = 0; i < 15; i++) {
             Instant ts = day.atTime(14, i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.failure(
-                    primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200));
+            { ConnectionAttempt obs3 = ConnectionAttempt.failure(
+                    primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200);
+              store.record(obs3);
+              analyzer.observe(obs3); }
         }
         for (int i = 0; i < 3; i++) {
             Instant ts = day.atTime(14, 40 + i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.failure(
-                    primary, ts, AttemptOutcome.FAILURE, FailureType.NETWORK_UNREACHABLE, 40));
+            { ConnectionAttempt obs4 = ConnectionAttempt.failure(
+                    primary, ts, AttemptOutcome.FAILURE, FailureType.NETWORK_UNREACHABLE, 40);
+              store.record(obs4);
+              analyzer.observe(obs4); }
         }
         for (int i = 0; i < 15; i++) {
             Instant ts = day.atTime(14, i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.success(backup, ts, 6));
+            { ConnectionAttempt obs5 = ConnectionAttempt.success(backup, ts, 6);
+              store.record(obs5);
+              analyzer.observe(obs5); }
         }
         analyzer.analyzeAll();
 
@@ -93,27 +103,35 @@ class RoutingDeciderTest {
         // Both endpoints fail hard in the 14:00 window and end in active clusters.
         for (int i = 0; i < 15; i++) {
             Instant ts = day.atTime(14, i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.failure(
-                    primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200));
-            store.record(ConnectionAttempt.failure(
-                    backup, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200));
+            { ConnectionAttempt obs6 = ConnectionAttempt.failure(
+                    primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200);
+              store.record(obs6);
+              analyzer.observe(obs6); }
+            { ConnectionAttempt obs7 = ConnectionAttempt.failure(
+                    backup, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 200);
+              store.record(obs7);
+              analyzer.observe(obs7); }
         }
         // Primary has a longer trailing cluster → higher risk than backup.
         for (int i = 0; i < 4; i++) {
-            store.record(ConnectionAttempt.failure(
+            { ConnectionAttempt obs8 = ConnectionAttempt.failure(
                     primary,
                     day.atTime(14, 40 + i).toInstant(ZoneOffset.UTC),
                     AttemptOutcome.FAILURE,
                     FailureType.NETWORK_UNREACHABLE,
-                    40));
+                    40);
+              store.record(obs8);
+              analyzer.observe(obs8); }
         }
         for (int i = 0; i < 2; i++) {
-            store.record(ConnectionAttempt.failure(
+            { ConnectionAttempt obs9 = ConnectionAttempt.failure(
                     backup,
                     day.atTime(14, 40 + i).toInstant(ZoneOffset.UTC),
                     AttemptOutcome.FAILURE,
                     FailureType.NETWORK_UNREACHABLE,
-                    40));
+                    40);
+              store.record(obs9);
+              analyzer.observe(obs9); }
         }
         analyzer.analyzeAll();
 

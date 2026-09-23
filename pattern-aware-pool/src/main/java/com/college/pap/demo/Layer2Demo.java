@@ -54,6 +54,12 @@ public final class Layer2Demo {
                     30));
         }
 
+                // Hourly learning is observe()-driven (not rebuilt from the ring buffer).
+        for (EndpointId id : store.knownEndpoints()) {
+            for (ConnectionAttempt a : store.getHistory(id)) {
+                analyzer.observe(a);
+            }
+        }
         analyzer.analyzeAll();
 
         Instant morning = day.atTime(9, 15).toInstant(ZoneOffset.UTC);

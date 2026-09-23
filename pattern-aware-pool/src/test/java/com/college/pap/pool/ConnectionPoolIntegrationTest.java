@@ -48,16 +48,20 @@ class ConnectionPoolIntegrationTest {
             for (int d = 0; d < 5; d++) {
                 LocalDate hist = day.minusDays(5 - d);
                 for (int i = 0; i < 6; i++) {
-                    pool.historyStore().record(ConnectionAttempt.failure(
+                    ConnectionAttempt fail = ConnectionAttempt.failure(
                             primary,
                             hist.atTime(14, i * 5).toInstant(ZoneOffset.UTC),
                             AttemptOutcome.TIMEOUT,
                             FailureType.TIMEOUT,
-                            80));
-                    pool.historyStore().record(ConnectionAttempt.success(
+                            80);
+                    pool.historyStore().record(fail);
+                    pool.analyzer().observe(fail);
+                    ConnectionAttempt ok = ConnectionAttempt.success(
                             backup,
                             hist.atTime(14, i * 5).toInstant(ZoneOffset.UTC),
-                            5));
+                            5);
+                    pool.historyStore().record(ok);
+                    pool.analyzer().observe(ok);
                 }
             }
             pool.analyzer().analyzeAll();

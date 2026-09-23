@@ -37,23 +37,27 @@ class BackupPreWarmerTest {
         EndpointRegistry registry = EndpointRegistry.of(primary, backup);
 
         FailureHistoryStore store = new FailureHistoryStore(300);
+PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         for (int i = 0; i < 20; i++) {
-            store.record(ConnectionAttempt.failure(
+            { ConnectionAttempt obs1 = ConnectionAttempt.failure(
                     primary,
                     day.atTime(14, i).toInstant(ZoneOffset.UTC),
                     AttemptOutcome.TIMEOUT,
                     FailureType.TIMEOUT,
-                    50));
+                    50);
+              store.record(obs1);
+              analyzer.observe(obs1); }
         }
         for (int i = 0; i < 20; i++) {
-            store.record(ConnectionAttempt.success(
+            { ConnectionAttempt obs2 = ConnectionAttempt.success(
                     backup,
                     day.atTime(13, i).toInstant(ZoneOffset.UTC),
-                    10));
+                    10);
+              store.record(obs2);
+              analyzer.observe(obs2); }
         }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
-        analyzer.analyzeAll();
+                analyzer.analyzeAll();
 
         Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
         connectors.put(primary, FlakyEndpointConnector.forTests(

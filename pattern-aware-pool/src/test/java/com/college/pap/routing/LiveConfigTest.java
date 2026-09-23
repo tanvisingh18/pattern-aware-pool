@@ -29,22 +29,28 @@ class LiveConfigTest {
         EndpointId primary = new EndpointId("primary-db");
         EndpointId backup = new EndpointId("backup-db");
         FailureHistoryStore store = new FailureHistoryStore(200);
+PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         LocalDate day = LocalDate.of(2026, 7, 26);
 
         for (int i = 0; i < 10; i++) {
             Instant ts = day.atTime(10, i).toInstant(ZoneOffset.UTC);
-            store.record(ConnectionAttempt.success(primary, ts, 5));
-            store.record(ConnectionAttempt.success(backup, ts, 5));
+            { ConnectionAttempt obs1 = ConnectionAttempt.success(primary, ts, 5);
+              store.record(obs1);
+              analyzer.observe(obs1); }
+            { ConnectionAttempt obs2 = ConnectionAttempt.success(backup, ts, 5);
+              store.record(obs2);
+              analyzer.observe(obs2); }
         }
-        store.record(ConnectionAttempt.failure(
+        { ConnectionAttempt obs3 = ConnectionAttempt.failure(
                 primary,
                 day.atTime(10, 30).toInstant(ZoneOffset.UTC),
                 AttemptOutcome.FAILURE,
                 FailureType.TIMEOUT,
-                20));
+                20);
+          store.record(obs3);
+          analyzer.observe(obs3); }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
-        analyzer.analyzeAll();
+                analyzer.analyzeAll();
 
         PoolConfig config = new PoolConfig();
         config.setZoneId(ZoneOffset.UTC);

@@ -16,7 +16,8 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Demos recomputed routing decisions | Print `PapConnection.routingDecision()` | demo smoke | `c2a7563` |
 | Paper hardcoded 83→3; claimed JavaFX/Spring | `generate_review2_paper.py` reads `experiment_summary.csv`; Swing + Spring-compatible lifecycle wording; threats section | paper regen | `75fa057` |
 | Machine-specific README | Portable `JAVA_HOME` + `mvn` docs | — | `c2a7563` |
-| JDBC pool unsafe (open tx, closed proxy, blocking borrow, validate under lock) | Release rollback + restore defaults; closed proxy; `borrowTimeoutMillis`/`validationIdleMillis`; validate outside lock; credential `getConnection` unsupported | `PoolSafetyTest` (6) | `9cb8bc6` |
+| JDBC pool unsafe (open tx, closed proxy, blocking borrow, validate under lock) | Release rollback + restore defaults; closed proxy; `borrowTimeoutMillis`/`validationIdleMillis`; validate outside lock; credential `getConnection` unsupported | `PoolSafetyTest` (6) | `f926b76` |
+| Hourly learning depended on ring buffer; reuse recorded as attempts | Remove `ensureCountersFromHistory`; hourly stats only via `observe()`; inject clock for `computedAt`; skip reuse in `acquireAndRecord` | `PatternAnalyzerTest.hourlyLearningSurvivesRingBufferEviction` | *(item 2)* |
 
 ## Before vs after (bad-window connect failures / 100 req)
 
@@ -37,14 +38,14 @@ Notes:
 
 Outside the bad window, circuit breaker can show fewer connect failures than predictive (morning ~5.4 vs ~11.9) when predictive briefly avoids after live clusters — reported honestly in the paper.
 
-## `mvn test` summary (after item 1)
+## `mvn test` summary (after item 2)
 
 ```
-Tests run: 27, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 28, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-(JDK 17+ / Temurin; Maven 3.9.9)
+(JDK 17+ / Temurin 25; Maven 3.9.9)
 
 ## Remaining limitations
 

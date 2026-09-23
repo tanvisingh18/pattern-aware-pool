@@ -48,22 +48,26 @@ class RecoveryProbeTest {
         EndpointRegistry registry = EndpointRegistry.of(primary, backup);
 
         FailureHistoryStore store = new FailureHistoryStore(200);
+PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         Instant base = day.atTime(11, 0).toInstant(ZoneOffset.UTC);
         // Seed a live failure cluster on primary (run length >= 3).
         for (int i = 0; i < 3; i++) {
-            store.record(ConnectionAttempt.failure(
+            { ConnectionAttempt obs1 = ConnectionAttempt.failure(
                     primary,
                     base.plusSeconds(i),
                     AttemptOutcome.FAILURE,
                     FailureType.NETWORK_UNREACHABLE,
-                    20));
+                    20);
+              store.record(obs1);
+              analyzer.observe(obs1); }
         }
         for (int i = 0; i < 5; i++) {
-            store.record(ConnectionAttempt.success(backup, base.plusSeconds(i), 5));
+            { ConnectionAttempt obs2 = ConnectionAttempt.success(backup, base.plusSeconds(i), 5);
+              store.record(obs2);
+              analyzer.observe(obs2); }
         }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
-        analyzer.analyzeAll();
+                analyzer.analyzeAll();
 
         PoolConfig config = new PoolConfig();
         config.setZoneId(ZoneOffset.UTC);

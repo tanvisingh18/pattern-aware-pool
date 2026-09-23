@@ -29,6 +29,7 @@ class HotHourFailoverTest {
         EndpointId primary = new EndpointId("primary-db");
         EndpointId backup = new EndpointId("backup-db");
         FailureHistoryStore store = new FailureHistoryStore(5000);
+        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         LocalDate start = LocalDate.of(2026, 7, 20);
 
         // 5 days × several samples at hour 14, all failures on primary.
@@ -36,16 +37,19 @@ class HotHourFailoverTest {
             LocalDate d = start.plusDays(day);
             for (int i = 0; i < 6; i++) {
                 Instant ts = d.atTime(14, i * 5).toInstant(ZoneOffset.UTC);
-                store.record(ConnectionAttempt.failure(
-                        primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 80));
+                ConnectionAttempt fail = ConnectionAttempt.failure(
+                        primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 80);
+                store.record(fail);
+                analyzer.observe(fail);
             }
             for (int i = 0; i < 6; i++) {
                 Instant ts = d.atTime(14, i * 5).toInstant(ZoneOffset.UTC);
-                store.record(ConnectionAttempt.success(backup, ts, 5));
+                ConnectionAttempt ok = ConnectionAttempt.success(backup, ts, 5);
+                store.record(ok);
+                analyzer.observe(ok);
             }
         }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         analyzer.analyzeAll();
 
         PoolConfig config = new PoolConfig();

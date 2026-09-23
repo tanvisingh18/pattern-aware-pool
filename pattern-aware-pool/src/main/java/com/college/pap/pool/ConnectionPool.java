@@ -86,7 +86,7 @@ public final class ConnectionPool implements AutoCloseable {
         ZoneId zone = config.zoneId();
         this.historyStore = new FailureHistoryStore(config.historyCapacity());
         this.analyzer = new PatternAnalyzer(
-                historyStore, 0.35, 20, 2, zone);
+                historyStore, 0.35, 20, 2, zone, clock);
         this.resetDetector = new ResetPatternDetector();
         // LIVE config suppliers — RMI retune takes effect immediately.
         this.predictionEngine = new PredictionEngine(config, clock);

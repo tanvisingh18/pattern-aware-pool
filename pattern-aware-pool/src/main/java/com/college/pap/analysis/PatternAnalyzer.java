@@ -6,6 +6,7 @@ import com.college.pap.model.ConnectionAttempt;
 import com.college.pap.model.EndpointId;
 import com.college.pap.model.EndpointRiskProfile;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.HashMap;
@@ -18,6 +19,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * Layer 1 — Pattern learning with incremental hourly stats.
  * First {@code minHourSamples} observations use a plain mean (Laplace only while
  * still under that threshold); afterwards EWMA with alpha 0.35.
+ *
+ * <p>Hourly counters are updated only by {@link #observe}; they are never rebuilt
+ * from the ring buffer, so learning survives capacity eviction.
  */
 public final class PatternAnalyzer {
 
@@ -29,6 +33,7 @@ public final class PatternAnalyzer {
     private final int clusterThreshold;
     private final int minHourSamples;
     private final ZoneId zoneId;
+    private final Clock clock;
 
     private final FailureHistoryStore historyStore;
     private final Map<EndpointId, EndpointRiskProfile> profiles = new ConcurrentHashMap<>();
@@ -44,7 +49,8 @@ public final class PatternAnalyzer {
             int recentWindow,
             int clusterThreshold,
             ZoneId zoneId) {
-        this(historyStore, ewmaAlpha, recentWindow, clusterThreshold, DEFAULT_MIN_HOUR_SAMPLES, zoneId);
+        this(historyStore, ewmaAlpha, recentWindow, clusterThreshold, DEFAULT_MIN_HOUR_SAMPLES, zoneId,
+                Clock.system(zoneId));
     }
 
     public PatternAnalyzer(
@@ -54,6 +60,28 @@ public final class PatternAnalyzer {
             int clusterThreshold,
             int minHourSamples,
             ZoneId zoneId) {
+        this(historyStore, ewmaAlpha, recentWindow, clusterThreshold, minHourSamples, zoneId,
+                Clock.system(zoneId));
+    }
+
+    public PatternAnalyzer(
+            FailureHistoryStore historyStore,
+            double ewmaAlpha,
+            int recentWindow,
+            int clusterThreshold,
+            ZoneId zoneId,
+            Clock clock) {
+        this(historyStore, ewmaAlpha, recentWindow, clusterThreshold, DEFAULT_MIN_HOUR_SAMPLES, zoneId, clock);
+    }
+
+    public PatternAnalyzer(
+            FailureHistoryStore historyStore,
+            double ewmaAlpha,
+            int recentWindow,
+            int clusterThreshold,
+            int minHourSamples,
+            ZoneId zoneId,
+            Clock clock) {
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
         if (ewmaAlpha <= 0.0 || ewmaAlpha > 1.0) {
             throw new IllegalArgumentException("ewmaAlpha must be in (0, 1]");
@@ -72,13 +100,18 @@ public final class PatternAnalyzer {
         this.clusterThreshold = clusterThreshold;
         this.minHourSamples = minHourSamples;
         this.zoneId = Objects.requireNonNull(zoneId, "zoneId");
+        this.clock = Objects.requireNonNull(clock, "clock");
     }
 
     public ZoneId zoneId() {
         return zoneId;
     }
 
-    /** Call when a new attempt is recorded so counters stay fresh. */
+    public Clock clock() {
+        return clock;
+    }
+
+    /** Call exactly once per recorded attempt so hourly counters stay fresh. */
     public void observe(ConnectionAttempt attempt) {
         Objects.requireNonNull(attempt);
         int hour = attempt.timestamp().atZone(zoneId).getHour();
@@ -97,8 +130,8 @@ public final class PatternAnalyzer {
     public EndpointRiskProfile analyze(EndpointId endpointId) {
         Objects.requireNonNull(endpointId, "endpointId");
         List<ConnectionAttempt> history = historyStore.getHistory(endpointId);
-        ensureCountersFromHistory(endpointId, history);
-        EndpointRiskProfile profile = buildProfile(endpointId, history, Instant.now());
+        // Hourly stats come only from observe() — never rebuilt from the ring buffer.
+        EndpointRiskProfile profile = buildProfile(endpointId, history, clock.instant());
         profiles.put(endpointId, profile);
         return profile;
     }
@@ -109,15 +142,6 @@ public final class PatternAnalyzer {
 
     public Map<EndpointId, EndpointRiskProfile> getAllProfiles() {
         return Map.copyOf(profiles);
-    }
-
-    private void ensureCountersFromHistory(EndpointId endpointId, List<ConnectionAttempt> history) {
-        HourlyStats c = new HourlyStats();
-        for (ConnectionAttempt attempt : history) {
-            int hour = attempt.timestamp().atZone(zoneId).getHour();
-            c.record(hour, attempt.isFailure(), ewmaAlpha, minHourSamples);
-        }
-        counters.put(endpointId, c);
     }
 
     private EndpointRiskProfile buildProfile(

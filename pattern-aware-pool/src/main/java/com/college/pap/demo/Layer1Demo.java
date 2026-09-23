@@ -50,6 +50,12 @@ public final class Layer1Demo {
                     40 + i));
         }
 
+                // Hourly learning is observe()-driven (not rebuilt from the ring buffer).
+        for (EndpointId id : store.knownEndpoints()) {
+            for (ConnectionAttempt a : store.getHistory(id)) {
+                analyzer.observe(a);
+            }
+        }
         analyzer.analyzeAll();
 
         printProfile(analyzer.getProfile(primary));
