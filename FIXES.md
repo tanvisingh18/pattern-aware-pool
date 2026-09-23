@@ -16,6 +16,7 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Demos recomputed routing decisions | Print `PapConnection.routingDecision()` | demo smoke | `c2a7563` |
 | Paper hardcoded 83→3; claimed JavaFX/Spring | `generate_review2_paper.py` reads `experiment_summary.csv`; Swing + Spring-compatible lifecycle wording; threats section | paper regen | `75fa057` |
 | Machine-specific README | Portable `JAVA_HOME` + `mvn` docs | — | `c2a7563` |
+| JDBC pool unsafe (open tx, closed proxy, blocking borrow, validate under lock) | Release rollback + restore defaults; closed proxy; `borrowTimeoutMillis`/`validationIdleMillis`; validate outside lock; credential `getConnection` unsupported | `PoolSafetyTest` (6) | `9cb8bc6` |
 
 ## Before vs after (bad-window connect failures / 100 req)
 
@@ -36,20 +37,20 @@ Notes:
 
 Outside the bad window, circuit breaker can show fewer connect failures than predictive (morning ~5.4 vs ~11.9) when predictive briefly avoids after live clusters — reported honestly in the paper.
 
-## `mvn test` summary
+## `mvn test` summary (after item 1)
 
 ```
-Tests run: 21, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 27, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-(JDK 17+ / Temurin 25; Maven 3.9.9)
+(JDK 17+ / Temurin; Maven 3.9.9)
 
 ## Remaining limitations
 
 1. Evaluation uses `FlakyEndpointConnector`, not production WAN traces.
 2. Predictive over-avoidance after bursts is mitigated by recovery probes but not eliminated.
-3. Scoring still uses EWMA time-of-day; hot-hour gating uses plain rate (by design).
+3. Scoring still uses EWMA time-of-day; hot-hour gating uses plain rate (by design — pending EWMA gating).
 4. Review-2 cites fewer papers than Review-1’s 21 — intentional scope; Review-1 unchanged.
 5. Multi-region / multi-driver production matrices are future work.
 

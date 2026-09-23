@@ -23,6 +23,8 @@ public final class PoolConfig {
     private volatile int maxPoolSizePerEndpoint = 10;
     private volatile long recoveryProbeSeconds = 30;
     private volatile boolean reuseEnabled = true;
+    private volatile long borrowTimeoutMillis = 3000;
+    private volatile long validationIdleMillis = 5000;
     private volatile ZoneId zoneId = ZoneId.systemDefault();
 
     public RiskWeights weights() {
@@ -143,6 +145,22 @@ public final class PoolConfig {
 
     public void setReuseEnabled(boolean reuseEnabled) {
         this.reuseEnabled = reuseEnabled;
+    }
+
+    public long borrowTimeoutMillis() {
+        return borrowTimeoutMillis;
+    }
+
+    public void setBorrowTimeoutMillis(long borrowTimeoutMillis) {
+        this.borrowTimeoutMillis = Math.max(0, borrowTimeoutMillis);
+    }
+
+    public long validationIdleMillis() {
+        return validationIdleMillis;
+    }
+
+    public void setValidationIdleMillis(long validationIdleMillis) {
+        this.validationIdleMillis = Math.max(0, validationIdleMillis);
     }
 
     public ZoneId zoneId() {

@@ -97,13 +97,17 @@ public final class ConnectionPool implements AutoCloseable {
         this.scheduler = Executors.newScheduledThreadPool(3, threadFactory);
 
         for (Map.Entry<EndpointId, EndpointConnector> e : this.connectors.entrySet()) {
+            EndpointId endpointId = e.getKey();
             idlePools.put(
-                    e.getKey(),
+                    endpointId,
                     new IdleConnectionPool(
                             e.getValue(),
                             validator,
                             config.maxPoolSizePerEndpoint(),
-                            config::reuseEnabled));
+                            config::reuseEnabled,
+                            config::borrowTimeoutMillis,
+                            config::validationIdleMillis,
+                            failureType -> recordBorrowValidationFailure(endpointId, failureType)));
         }
 
         EndpointId warmTarget = registry.firstBackup().orElse(registry.primary());
@@ -429,6 +433,7 @@ public final class ConnectionPool implements AutoCloseable {
             long beforePhysical = idle.physicalConnects();
             long beforeReuse = idle.reuseHits();
             PapConnection connection = idle.acquire();
+            boolean wasReuse = idle.reuseHits() > beforeReuse;
             if (idle.physicalConnects() > beforePhysical) {
                 metrics.recordPhysicalConnect();
                 EndpointConnector connector = connectors.get(endpointId);
@@ -436,13 +441,20 @@ public final class ConnectionPool implements AutoCloseable {
                     connection.setLastSimulatedLatencyMs(flaky.lastSimulatedLatencyMs());
                 }
             }
-            if (idle.reuseHits() > beforeReuse) {
+            if (wasReuse) {
                 metrics.recordReuseHit();
             }
-            recordAttempt(endpointId, true, FailureType.NONE, startNanos,
-                    connection.lastSimulatedLatencyMs());
+            // Idle reuse hits are not recorded as connection attempts (hourly learning).
+            if (!wasReuse) {
+                recordAttempt(endpointId, true, FailureType.NONE, startNanos,
+                        connection.lastSimulatedLatencyMs());
+            }
             return connection;
         } catch (EndpointConnector.ConnectionFailedException e) {
+            if (e.isPoolExhausted()) {
+                // Borrow timeout — not an endpoint failure; do not record/observe.
+                throw e;
+            }
             long sim = 0;
             EndpointConnector connector = connectors.get(endpointId);
             if (connector instanceof FlakyEndpointConnector flaky) {
@@ -454,6 +466,16 @@ public final class ConnectionPool implements AutoCloseable {
             metrics.recordConnectFailure();
             throw e;
         }
+    }
+
+    private void recordBorrowValidationFailure(EndpointId endpointId, FailureType type) {
+        Instant started = clock.instant();
+        ConnectionAttempt attempt = ConnectionAttempt.failure(
+                endpointId, started, AttemptOutcome.FAILURE, type, 0);
+        historyStore.record(attempt);
+        analyzer.observe(attempt);
+        resetDetector.observe(attempt);
+        metrics.recordConnectFailure();
     }
 
     private void recordAttempt(
@@ -472,6 +494,14 @@ public final class ConnectionPool implements AutoCloseable {
         historyStore.record(attempt);
         analyzer.observe(attempt);
         resetDetector.observe(attempt);
+    }
+
+    public long openPhysicalCount() {
+        long total = 0;
+        for (IdleConnectionPool p : idlePools.values()) {
+            total += p.openPhysicalCount();
+        }
+        return total;
     }
 
     private static long elapsedMs(long startNanos, long simulatedFallback) {

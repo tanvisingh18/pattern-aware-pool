@@ -40,7 +40,8 @@ public final class PooledDataSource implements DataSource {
 
     @Override
     public Connection getConnection(String username, String password) throws SQLException {
-        return getConnection();
+        throw new SQLFeatureNotSupportedException(
+                "credential override not supported; use getConnection()");
     }
 
     @Override

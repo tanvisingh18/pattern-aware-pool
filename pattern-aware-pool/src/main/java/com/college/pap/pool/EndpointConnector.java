@@ -14,15 +14,26 @@ public interface EndpointConnector {
 
     final class ConnectionFailedException extends Exception {
         private final FailureType failureType;
+        private final boolean poolExhausted;
         private long simulatedLatencyMs;
 
         public ConnectionFailedException(String message, FailureType failureType) {
+            this(message, failureType, false);
+        }
+
+        public ConnectionFailedException(String message, FailureType failureType, boolean poolExhausted) {
             super(message);
             this.failureType = failureType == null ? FailureType.UNKNOWN : failureType;
+            this.poolExhausted = poolExhausted;
         }
 
         public FailureType failureType() {
             return failureType;
+        }
+
+        /** True when borrow timed out waiting for a permit — not an endpoint failure. */
+        public boolean isPoolExhausted() {
+            return poolExhausted;
         }
 
         public long simulatedLatencyMs() {

@@ -4,6 +4,7 @@ import com.college.pap.model.EndpointId;
 import com.college.pap.routing.RoutingDecision;
 
 import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
@@ -23,9 +24,14 @@ public final class PapConnection implements AutoCloseable {
     private final AtomicBoolean destroyed = new AtomicBoolean(false);
     private final Instant createdAt;
     private final boolean preWarmed;
+    private final boolean capturedAutoCommit;
+    private final boolean capturedReadOnly;
+    private final int capturedTransactionIsolation;
+    private final boolean jdbcDefaultsCaptured;
     private volatile IdleConnectionPool owner;
     private volatile RoutingDecision routingDecision;
     private volatile long lastSimulatedLatencyMs;
+    private volatile long idleSinceEpochMs = -1L;
 
     public PapConnection(EndpointId endpointId, Object nativeHandle, Runnable onClose, boolean preWarmed) {
         this(endpointId, nativeHandle, onClose, preWarmed, null);
@@ -43,6 +49,25 @@ public final class PapConnection implements AutoCloseable {
         this.preWarmed = preWarmed;
         this.owner = owner;
         this.createdAt = Instant.now();
+
+        boolean autoCommit = true;
+        boolean readOnly = false;
+        int isolation = Connection.TRANSACTION_READ_COMMITTED;
+        boolean captured = false;
+        if (nativeHandle instanceof Connection jdbc) {
+            try {
+                autoCommit = jdbc.getAutoCommit();
+                readOnly = jdbc.isReadOnly();
+                isolation = jdbc.getTransactionIsolation();
+                captured = true;
+            } catch (SQLException ignored) {
+                captured = false;
+            }
+        }
+        this.capturedAutoCommit = autoCommit;
+        this.capturedReadOnly = readOnly;
+        this.capturedTransactionIsolation = isolation;
+        this.jdbcDefaultsCaptured = captured;
     }
 
     public EndpointId endpointId() {
@@ -87,6 +112,48 @@ public final class PapConnection implements AutoCloseable {
     void prepareForCheckout() {
         if (!destroyed.get()) {
             checkedOut.set(true);
+            idleSinceEpochMs = -1L;
+        }
+    }
+
+    void markIdle(long epochMs) {
+        idleSinceEpochMs = epochMs;
+    }
+
+    long idleSinceEpochMs() {
+        return idleSinceEpochMs;
+    }
+
+    long idleMillis(long nowEpochMs) {
+        long since = idleSinceEpochMs;
+        if (since < 0) {
+            return 0L;
+        }
+        return Math.max(0L, nowEpochMs - since);
+    }
+
+    /**
+     * On release: if JDBC and autoCommit is false, rollback, restore autoCommit/readOnly/
+     * transactionIsolation to creation defaults. Returns false if any step throws
+     * (caller must destroy instead of returning to idle).
+     */
+    boolean resetJdbcStateAfterUse() {
+        if (!(nativeHandle instanceof Connection jdbc) || !jdbcDefaultsCaptured) {
+            return true;
+        }
+        try {
+            if (!jdbc.getAutoCommit()) {
+                jdbc.rollback();
+                jdbc.setAutoCommit(true);
+            }
+            jdbc.setReadOnly(capturedReadOnly);
+            jdbc.setTransactionIsolation(capturedTransactionIsolation);
+            if (capturedAutoCommit != jdbc.getAutoCommit()) {
+                jdbc.setAutoCommit(capturedAutoCommit);
+            }
+            return true;
+        } catch (SQLException e) {
+            return false;
         }
     }
 
@@ -121,6 +188,7 @@ public final class PapConnection implements AutoCloseable {
     public void destroy() {
         owner = null;
         checkedOut.set(false);
+        idleSinceEpochMs = -1L;
         if (destroyed.compareAndSet(false, true)) {
             onClose.run();
         }
