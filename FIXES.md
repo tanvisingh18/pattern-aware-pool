@@ -21,7 +21,7 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Hot-hour gating used lifetime plain rate | Gate on EWMA after ≥ hotHourMinSamples; plain rate display-only | `HotHourEwmaCooldownTest` | `843e9a3` |
 | Experiments: recovery=5s; ticks predictive-only; curated before_fixes; missing scenarios | recoveryProbeSeconds=30; backgroundTick all modes; CSV columns for probes/prewarm/physical/user-facing; window-start, pattern-shift, reuse; before_fixes→FIXES.md | ExperimentRunner n=30 | `1757e40` |
 | Paper used audit/honest/curated wording; inconsistent sections; missing scenarios | Strip forbidden wording; Roman I–VIII; user-facing failures + probe/prewarm columns; window-start / pattern-shift / reuse; healthy-hour backup share | paper regen from CSV | `1fba801` |
-| No Maven wrapper; README pointed at `../.tools`; demo lacked recovery/PooledDataSource; RMI incomplete | `./mvnw`; README uses wrapper; RealJdbcDeployDemo recovery + SESSION_ID reuse; RMI hotHourThreshold/clusterAvoidRun/recoveryProbeSeconds; real RMI test + unexport | `PoolManagementServiceTest` + `./mvnw test` | *(item 6)* |
+| No Maven wrapper; README pointed at `../.tools`; demo lacked recovery/PooledDataSource; RMI incomplete | `./mvnw`; README uses wrapper; RealJdbcDeployDemo recovery + SESSION_ID reuse; RMI hotHourThreshold/clusterAvoidRun/recoveryProbeSeconds; real RMI test + unexport | `PoolManagementServiceTest` + `./mvnw test` | `193b7bf` |
 
 ## Before vs after (bad-window user-facing connect failures / 100 req)
 
