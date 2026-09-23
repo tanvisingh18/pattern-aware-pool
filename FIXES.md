@@ -14,7 +14,7 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Reset pattern claimed but unimplemented | `ResetPatternDetector` + `Trigger.RESET_PREDICTED` (one-shot) | `ResetPatternDetectorTest` | `9d23def` |
 | Experiments seeded day-8 answers; no CB baseline; sleep latency | Honest `ExperimentRunner`: 7-day learn, day-8 measure, REACTIVE / CIRCUIT_BREAKER / PREDICTIVE, seeded `Random`, simulated latency | manual run n=30 + `mvn test` | `50b0762` |
 | Demos recomputed routing decisions | Print `PapConnection.routingDecision()` | demo smoke | `c2a7563` |
-| Paper hardcoded 83→3; claimed JavaFX/Spring | `generate_review2_paper.py` reads `experiment_summary.csv`; Swing + Spring-compatible lifecycle wording; threats section | paper regen | phase 8 commit |
+| Paper hardcoded 83→3; claimed JavaFX/Spring | `generate_review2_paper.py` reads `experiment_summary.csv`; Swing + Spring-compatible lifecycle wording; threats section | paper regen | `75fa057` |
 | Machine-specific README | Portable `JAVA_HOME` + `mvn` docs | — | `c2a7563` |
 
 ## Before vs after (bad-window connect failures / 100 req)
