@@ -12,8 +12,8 @@ public final class HotHourRules {
     }
 
     /**
-     * Hot hour when there is enough evidence at {@code hour} and the failure rate
-     * meets the configured threshold.
+     * Hot hour when there is enough evidence at {@code hour} and the EWMA
+     * failure rate meets the configured threshold (plain rate is display-only).
      */
     public static boolean isHot(EndpointRiskProfile profile, int hour, PoolConfig config) {
         if (profile == null || config == null) {

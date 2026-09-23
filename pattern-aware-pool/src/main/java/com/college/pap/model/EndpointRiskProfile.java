@@ -97,12 +97,11 @@ public final class EndpointRiskProfile {
     }
 
     /**
-     * Hot-hour signal: enough samples and elevated plain failure rate.
-     * Uses the empirical rate so a short EWMA spike cannot permanently
-     * mark an hour as hot after traffic has already shifted away.
+     * Hot-hour signal: enough samples and elevated EWMA failure rate.
+     * Plain empirical rate is retained for display only.
      */
     public boolean isHotHour(int hour, int minSamples, double minRate) {
-        return samplesAtHour(hour) >= minSamples && plainFailureRateAtHour(hour) >= minRate;
+        return samplesAtHour(hour) >= minSamples && failureRateAtHour(hour) >= minRate;
     }
 
     public double[] hourlyFailureRates() {

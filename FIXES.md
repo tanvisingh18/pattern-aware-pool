@@ -18,6 +18,7 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Machine-specific README | Portable `JAVA_HOME` + `mvn` docs | — | `c2a7563` |
 | JDBC pool unsafe (open tx, closed proxy, blocking borrow, validate under lock) | Release rollback + restore defaults; closed proxy; `borrowTimeoutMillis`/`validationIdleMillis`; validate outside lock; credential `getConnection` unsupported | `PoolSafetyTest` (6) | `f926b76` |
 | Hourly learning depended on ring buffer; reuse recorded as attempts | Remove `ensureCountersFromHistory`; hourly stats only via `observe()`; inject clock for `computedAt`; skip reuse in `acquireAndRecord` | `PatternAnalyzerTest.hourlyLearningSurvivesRingBufferEviction` | *(item 2)* |
+| Hot-hour gating used lifetime plain rate | Gate on EWMA after ≥ hotHourMinSamples; plain rate display-only | `HotHourEwmaCooldownTest` | *(item 3)* |
 
 ## Before vs after (bad-window connect failures / 100 req)
 
@@ -38,10 +39,10 @@ Notes:
 
 Outside the bad window, circuit breaker can show fewer connect failures than predictive (morning ~5.4 vs ~11.9) when predictive briefly avoids after live clusters — reported honestly in the paper.
 
-## `mvn test` summary (after item 2)
+## `mvn test` summary (after item 3)
 
 ```
-Tests run: 28, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 29, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
@@ -51,7 +52,7 @@ BUILD SUCCESS
 
 1. Evaluation uses `FlakyEndpointConnector`, not production WAN traces.
 2. Predictive over-avoidance after bursts is mitigated by recovery probes but not eliminated.
-3. Scoring still uses EWMA time-of-day; hot-hour gating uses plain rate (by design — pending EWMA gating).
+3. Scoring still uses EWMA time-of-day; hot-hour gating uses EWMA (plain rate display-only).
 4. Review-2 cites fewer papers than Review-1’s 21 — intentional scope; Review-1 unchanged.
 5. Multi-region / multi-driver production matrices are future work.
 
