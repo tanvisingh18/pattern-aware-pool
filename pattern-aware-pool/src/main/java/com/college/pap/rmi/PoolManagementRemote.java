@@ -20,4 +20,16 @@ public interface PoolManagementRemote extends Remote {
     void setRiskWeights(double alpha, double beta, double gamma) throws RemoteException;
 
     String getRiskWeights() throws RemoteException;
+
+    double getHotHourThreshold() throws RemoteException;
+
+    void setHotHourThreshold(double threshold) throws RemoteException;
+
+    int getClusterAvoidRun() throws RemoteException;
+
+    void setClusterAvoidRun(int runLength) throws RemoteException;
+
+    long getRecoveryProbeSeconds() throws RemoteException;
+
+    void setRecoveryProbeSeconds(long seconds) throws RemoteException;
 }

@@ -1,79 +1,81 @@
 package com.college.pap.rmi;
 
-import com.college.pap.analysis.PatternAnalyzer;
-import com.college.pap.history.FailureHistoryStore;
-import com.college.pap.model.AttemptOutcome;
-import com.college.pap.model.ConnectionAttempt;
-import com.college.pap.model.EndpointId;
-import com.college.pap.model.FailureType;
-import com.college.pap.pool.PoolConfig;
-import com.college.pap.prediction.PredictionEngine;
-import com.college.pap.prediction.RiskWeights;
-import com.college.pap.routing.EndpointRegistry;
-import com.college.pap.routing.RoutingDecider;
-import com.college.pap.routing.RoutingDecision;
+import com.college.pap.pool.ConnectionPool;
+import com.college.pap.pool.PoolBuilder;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
-import java.time.Clock;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.ZoneOffset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.rmi.server.UnicastRemoteObject;
+import java.sql.Connection;
+import java.sql.Statement;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Verifies PoolManagementService-style config mutation (without RMI export).
- * Changing highRiskThreshold on the shared PoolConfig is visible to RoutingDecider.
+ * Exercises the real {@link PoolManagementService} (exported RMI object) and unexports after.
  */
 class PoolManagementServiceTest {
 
-    @Test
-    void configMutationViaServiceStyleSetterAffectsRouting() {
-        EndpointId primary = new EndpointId("primary-db");
-        EndpointId backup = new EndpointId("backup-db");
-        FailureHistoryStore store = new FailureHistoryStore(200);
-PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
-        LocalDate day = LocalDate.of(2026, 7, 26);
+    private PoolManagementService service;
+    private ConnectionPool pool;
 
-        for (int i = 0; i < 8; i++) {
-            Instant ts = day.atTime(9, i).toInstant(ZoneOffset.UTC);
-            { ConnectionAttempt obs1 = ConnectionAttempt.success(primary, ts, 5);
-              store.record(obs1);
-              analyzer.observe(obs1); }
-            { ConnectionAttempt obs2 = ConnectionAttempt.success(backup, ts, 5);
-              store.record(obs2);
-              analyzer.observe(obs2); }
+    @AfterEach
+    void tearDown() throws Exception {
+        if (service != null) {
+            UnicastRemoteObject.unexportObject(service, true);
+            service = null;
         }
-        { ConnectionAttempt obs3 = ConnectionAttempt.failure(
-                primary,
-                day.atTime(9, 20).toInstant(ZoneOffset.UTC),
-                AttemptOutcome.FAILURE,
-                FailureType.TIMEOUT,
-                15);
-          store.record(obs3);
-          analyzer.observe(obs3); }
+        if (pool != null) {
+            pool.close();
+            pool = null;
+        }
+    }
 
-                analyzer.analyzeAll();
+    @Test
+    void realServiceMutatesLiveConfigAndIsUnexported() throws Exception {
+        Path dataDir = Path.of("target", "rmi-test-db");
+        Files.createDirectories(dataDir);
+        String url = "jdbc:h2:file:" + dataDir.toAbsolutePath() + "/rmi;DB_CLOSE_DELAY=-1";
+        try (Connection c = java.sql.DriverManager.getConnection(url, "sa", "");
+             Statement st = c.createStatement()) {
+            st.execute("CREATE TABLE IF NOT EXISTS healthcheck(id INT PRIMARY KEY, ok BOOLEAN)");
+            st.execute("MERGE INTO healthcheck KEY(id) VALUES (1, TRUE)");
+        }
 
-        PoolConfig config = new PoolConfig();
-        config.setZoneId(ZoneOffset.UTC);
-        config.setHighRiskThreshold(0.55);
+        pool = PoolBuilder.create()
+                .primary("primary-db", url, "sa", "")
+                .backup("backup-db", url, "sa", "")
+                .highRiskThreshold(0.55)
+                .buildPredictive();
 
-        Instant at = day.atTime(9, 25).toInstant(ZoneOffset.UTC);
-        PredictionEngine engine = new PredictionEngine(
-                RiskWeights.defaults(), Clock.fixed(at, ZoneOffset.UTC));
-        RoutingDecider routingDecider = new RoutingDecider(
-                EndpointRegistry.of(primary, backup), analyzer, engine, config);
+        service = new PoolManagementService(pool);
+        PoolManagementRemote remote = service;
 
-        // Simulate PoolManagementService.setHighRiskThreshold without RMI export.
-        config.setHighRiskThreshold(0.0);
-        assertEquals(0.0, routingDecider.highRiskThreshold(), 0.0001);
+        assertEquals(0.55, remote.getHighRiskThreshold(), 1e-9);
+        remote.setHighRiskThreshold(0.0);
+        assertEquals(0.0, pool.config().highRiskThreshold(), 1e-9);
 
-        RoutingDecision decision = routingDecider.decide(primary, at);
-        assertTrue(decision.rerouted());
-        assertTrue(decision.reason() == RoutingDecision.Reason.PREEMPTIVE_FAILOVER
-                || decision.reason() == RoutingDecision.Reason.DEGRADED_MODE);
-        assertEquals(backup, decision.selected());
+        remote.setHotHourThreshold(0.77);
+        assertEquals(0.77, pool.config().hotHourThreshold(), 1e-9);
+        assertEquals(0.77, remote.getHotHourThreshold(), 1e-9);
+
+        remote.setClusterAvoidRun(4);
+        assertEquals(4, pool.config().clusterAvoidRun());
+        assertEquals(4, remote.getClusterAvoidRun());
+
+        remote.setRecoveryProbeSeconds(12);
+        assertEquals(12, pool.config().recoveryProbeSeconds());
+        assertEquals(12, remote.getRecoveryProbeSeconds());
+
+        remote.setRiskWeights(0.5, 0.3, 0.2);
+        assertEquals(0.5, pool.config().weights().alpha(), 1e-9);
+        assertEquals(0.3, pool.config().weights().beta(), 1e-9);
+        assertEquals(0.2, pool.config().weights().gamma(), 1e-9);
+        assertTrue(remote.getRiskWeights() != null && !remote.getRiskWeights().isBlank());
+
+        assertTrue(remote.getMetricsSnapshot().length() > 0);
     }
 }

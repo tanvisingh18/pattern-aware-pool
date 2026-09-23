@@ -49,4 +49,34 @@ public final class PoolManagementService extends UnicastRemoteObject implements 
     public String getRiskWeights() {
         return pool.config().weights().toString();
     }
+
+    @Override
+    public double getHotHourThreshold() {
+        return pool.config().hotHourThreshold();
+    }
+
+    @Override
+    public void setHotHourThreshold(double threshold) {
+        pool.config().setHotHourThreshold(threshold);
+    }
+
+    @Override
+    public int getClusterAvoidRun() {
+        return pool.config().clusterAvoidRun();
+    }
+
+    @Override
+    public void setClusterAvoidRun(int runLength) {
+        pool.config().setClusterAvoidRun(runLength);
+    }
+
+    @Override
+    public long getRecoveryProbeSeconds() {
+        return pool.config().recoveryProbeSeconds();
+    }
+
+    @Override
+    public void setRecoveryProbeSeconds(long seconds) {
+        pool.config().setRecoveryProbeSeconds(seconds);
+    }
 }

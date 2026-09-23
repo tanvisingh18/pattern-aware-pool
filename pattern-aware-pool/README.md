@@ -5,7 +5,7 @@ Advanced Java final-year project — history-aware JDBC connection pool that lea
 ## Prerequisites
 
 - JDK 17+ (`JAVA_HOME` pointing at your JDK)
-- Maven 3.9+ on `PATH` (or use a local Maven under `../.tools/`)
+- No system Maven required — use the included Maven Wrapper (`./mvnw`)
 
 ```bash
 export JAVA_HOME="…/Contents/Home"   # your JDK 17+ install
@@ -16,21 +16,21 @@ cd pattern-aware-pool
 ## Build & test
 
 ```bash
-mvn test
+./mvnw test
 ```
 
 ## Demos
 
 ```bash
-mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.FullSystemDemo
-mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner
-mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.RealJdbcDeployDemo
+./mvnw -q exec:java -Ddemo.mainClass=com.college.pap.demo.FullSystemDemo
+./mvnw -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner
+./mvnw -q exec:java -Ddemo.mainClass=com.college.pap.demo.RealJdbcDeployDemo
 ```
 
 Optional Swing monitor:
 
 ```bash
-mvn -q exec:java -Ddemo.mainClass=com.college.pap.ui.MonitoringDashboard
+./mvnw -q exec:java -Ddemo.mainClass=com.college.pap.ui.MonitoringDashboard
 ```
 
 ## Deployable (real JDBC)
@@ -54,6 +54,8 @@ try (PapConnection c = pool.getConnection()) {
 - **Real / deployable:** `JdbcEndpointConnector` + `PoolBuilder` via `DriverManager`
 - **Optional simulator:** `FlakyEndpointConnector` for controlled experiments/paper graphs
 - Failures in `RealJdbcDeployDemo` are real TCP connection-refused errors, not mocks
+- Recovery phase starts an H2 TCP server on a free port and shows probe-driven return to primary
+- `PooledDataSource` phase shows `SESSION_ID()` reuse across checkouts
 
 ## Review-2 document
 
