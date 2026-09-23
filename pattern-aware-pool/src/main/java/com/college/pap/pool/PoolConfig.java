@@ -2,6 +2,7 @@ package com.college.pap.pool;
 
 import com.college.pap.prediction.RiskWeights;
 
+import java.time.ZoneId;
 import java.util.Objects;
 
 /**
@@ -17,9 +18,12 @@ public final class PoolConfig {
     private volatile long analyzerPeriodSeconds = 5;
     private volatile long preWarmPeriodSeconds = 2;
     private volatile int hotHourMinSamples = 5;
-    private volatile double hotHourMinRate = 0.50;
+    private volatile double hotHourThreshold = 0.50;
+    private volatile int clusterAvoidRun = 3;
     private volatile int maxPoolSizePerEndpoint = 10;
     private volatile long recoveryProbeSeconds = 30;
+    private volatile boolean reuseEnabled = true;
+    private volatile ZoneId zoneId = ZoneId.systemDefault();
 
     public RiskWeights weights() {
         return weights;
@@ -91,12 +95,30 @@ public final class PoolConfig {
         this.hotHourMinSamples = Math.max(1, hotHourMinSamples);
     }
 
+    /** Preferred name for the hot-hour failure-rate threshold. */
+    public double hotHourThreshold() {
+        return hotHourThreshold;
+    }
+
+    public void setHotHourThreshold(double hotHourThreshold) {
+        this.hotHourThreshold = Math.max(0.0, Math.min(1.0, hotHourThreshold));
+    }
+
+    /** Alias kept for older call sites. */
     public double hotHourMinRate() {
-        return hotHourMinRate;
+        return hotHourThreshold;
     }
 
     public void setHotHourMinRate(double hotHourMinRate) {
-        this.hotHourMinRate = Math.max(0.0, Math.min(1.0, hotHourMinRate));
+        setHotHourThreshold(hotHourMinRate);
+    }
+
+    public int clusterAvoidRun() {
+        return clusterAvoidRun;
+    }
+
+    public void setClusterAvoidRun(int clusterAvoidRun) {
+        this.clusterAvoidRun = Math.max(1, clusterAvoidRun);
     }
 
     public int maxPoolSizePerEndpoint() {
@@ -113,5 +135,21 @@ public final class PoolConfig {
 
     public void setRecoveryProbeSeconds(long recoveryProbeSeconds) {
         this.recoveryProbeSeconds = Math.max(1, recoveryProbeSeconds);
+    }
+
+    public boolean reuseEnabled() {
+        return reuseEnabled;
+    }
+
+    public void setReuseEnabled(boolean reuseEnabled) {
+        this.reuseEnabled = reuseEnabled;
+    }
+
+    public ZoneId zoneId() {
+        return zoneId;
+    }
+
+    public void setZoneId(ZoneId zoneId) {
+        this.zoneId = Objects.requireNonNull(zoneId, "zoneId");
     }
 }

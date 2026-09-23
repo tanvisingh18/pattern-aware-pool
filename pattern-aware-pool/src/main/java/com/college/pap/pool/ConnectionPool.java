@@ -63,9 +63,10 @@ public final class ConnectionPool implements AutoCloseable {
         this.clock = Objects.requireNonNull(clock);
         this.predictiveMode = predictiveMode;
 
+        ZoneId zone = config.zoneId();
         this.historyStore = new FailureHistoryStore(config.historyCapacity());
         this.analyzer = new PatternAnalyzer(
-                historyStore, 0.35, 20, 2, ZoneId.systemDefault());
+                historyStore, 0.35, 20, 2, zone);
         // LIVE config suppliers — RMI retune takes effect immediately.
         this.predictionEngine = new PredictionEngine(config, clock);
         this.routingDecider = new RoutingDecider(registry, analyzer, predictionEngine, config);
@@ -76,7 +77,11 @@ public final class ConnectionPool implements AutoCloseable {
         for (Map.Entry<EndpointId, EndpointConnector> e : this.connectors.entrySet()) {
             idlePools.put(
                     e.getKey(),
-                    new IdleConnectionPool(e.getValue(), validator, config.maxPoolSizePerEndpoint()));
+                    new IdleConnectionPool(
+                            e.getValue(),
+                            validator,
+                            config.maxPoolSizePerEndpoint(),
+                            config::reuseEnabled));
         }
 
         EndpointId warmTarget = registry.firstBackup().orElse(registry.primary());
@@ -96,7 +101,7 @@ public final class ConnectionPool implements AutoCloseable {
 
         if (startBackground && predictiveMode) {
             scheduler.scheduleAtFixedRate(
-                    analyzer::analyzeAll,
+                    this::backgroundTickSafe,
                     0,
                     Math.max(1, config.analyzerPeriodSeconds()),
                     TimeUnit.SECONDS);
@@ -157,6 +162,7 @@ public final class ConnectionPool implements AutoCloseable {
                         // fall through to normal acquire
                     }
                     if (warm.isOpen()) {
+                        warm.setRoutingDecision(decision);
                         recordAttempt(selected, true, FailureType.NONE, start);
                         metrics.recordCheckout(decision, true, true, elapsedMs(start));
                         return warm;
@@ -169,6 +175,7 @@ public final class ConnectionPool implements AutoCloseable {
 
         try {
             PapConnection connection = acquireAndRecord(selected, start);
+            connection.setRoutingDecision(decision);
             metrics.recordCheckout(decision, true, false, elapsedMs(start));
             return connection;
         } catch (EndpointConnector.ConnectionFailedException firstFailure) {
@@ -185,8 +192,10 @@ public final class ConnectionPool implements AutoCloseable {
                             requested,
                             candidate,
                             RoutingDecision.Reason.DEGRADED_MODE,
+                            decision.trigger(),
                             score,
                             scores);
+                    connection.setRoutingDecision(fallback);
                     metrics.recordCheckout(fallback, true, false, elapsedMs(start));
                     return connection;
                 } catch (EndpointConnector.ConnectionFailedException ignored) {
@@ -202,6 +211,7 @@ public final class ConnectionPool implements AutoCloseable {
             throws EndpointConnector.ConnectionFailedException {
         EndpointConnector.ConnectionFailedException last = null;
         Instant at = clock.instant();
+        ZoneId zone = config.zoneId();
 
         for (EndpointId candidate : ordered(requested)) {
             try {
@@ -210,7 +220,7 @@ public final class ConnectionPool implements AutoCloseable {
                         candidate,
                         candidate.equals(requested) ? 0.1 : 0.9,
                         0, 0, 0,
-                        at.atZone(ZoneId.systemDefault()).getHour());
+                        at.atZone(zone).getHour());
                 Map<EndpointId, RiskScore> scores = Map.of(candidate, score);
                 RoutingDecision decision = new RoutingDecision(
                         requested,
@@ -218,8 +228,10 @@ public final class ConnectionPool implements AutoCloseable {
                         candidate.equals(requested)
                                 ? RoutingDecision.Reason.PRIMARY_OK
                                 : RoutingDecision.Reason.DEGRADED_MODE,
+                        RoutingDecision.Trigger.NONE,
                         score,
                         scores);
+                connection.setRoutingDecision(decision);
                 metrics.recordCheckout(decision, true, false, elapsedMs(start));
                 return connection;
             } catch (EndpointConnector.ConnectionFailedException e) {
@@ -228,11 +240,12 @@ public final class ConnectionPool implements AutoCloseable {
         }
 
         RiskScore failScore = new RiskScore(
-                requested, 1.0, 1, 1, 1, at.atZone(ZoneId.systemDefault()).getHour());
+                requested, 1.0, 1, 1, 1, at.atZone(zone).getHour());
         RoutingDecision failed = new RoutingDecision(
                 requested,
                 requested,
                 RoutingDecision.Reason.DEGRADED_MODE,
+                RoutingDecision.Trigger.SCORE,
                 failScore,
                 Map.of(requested, failScore));
         metrics.recordCheckout(failed, false, false, elapsedMs(start));
@@ -268,7 +281,15 @@ public final class ConnectionPool implements AutoCloseable {
                     "no pool for " + endpointId, FailureType.UNKNOWN);
         }
         try {
+            long beforePhysical = idle.physicalConnects();
+            long beforeReuse = idle.reuseHits();
             PapConnection connection = idle.acquire();
+            if (idle.physicalConnects() > beforePhysical) {
+                metrics.recordPhysicalConnect();
+            }
+            if (idle.reuseHits() > beforeReuse) {
+                metrics.recordReuseHit();
+            }
             recordAttempt(endpointId, true, FailureType.NONE, startNanos);
             return connection;
         } catch (EndpointConnector.ConnectionFailedException e) {
@@ -291,6 +312,22 @@ public final class ConnectionPool implements AutoCloseable {
 
     private static long elapsedMs(long startNanos) {
         return (System.nanoTime() - startNanos) / 1_000_000L;
+    }
+
+    /** Analyzer + pre-warmer tick (including recovery probes). */
+    public void backgroundTick() {
+        analyzer.analyzeAll();
+        if (predictiveMode) {
+            preWarmer.tick();
+        }
+    }
+
+    private void backgroundTickSafe() {
+        try {
+            backgroundTick();
+        } catch (RuntimeException ignored) {
+            // keep scheduler alive
+        }
     }
 
     public FailureHistoryStore historyStore() {
@@ -337,11 +374,24 @@ public final class ConnectionPool implements AutoCloseable {
         return idlePools.get(endpointId);
     }
 
-    public void start() {
-        analyzer.analyzeAll();
-        if (predictiveMode) {
-            preWarmer.tick();
+    public long physicalConnects() {
+        long total = 0;
+        for (IdleConnectionPool p : idlePools.values()) {
+            total += p.physicalConnects();
         }
+        return total;
+    }
+
+    public long reuseHits() {
+        long total = 0;
+        for (IdleConnectionPool p : idlePools.values()) {
+            total += p.reuseHits();
+        }
+        return total;
+    }
+
+    public void start() {
+        backgroundTick();
     }
 
     public void shutdown() {

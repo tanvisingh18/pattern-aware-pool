@@ -77,9 +77,14 @@ public final class ConnectionAttempt {
         return outcome != AttemptOutcome.SUCCESS;
     }
 
-    /** Hour-of-day in 0..23 for time-correlation bucketing. */
+    /** Hour-of-day in 0..23 using UTC (legacy default). */
     public int hourOfDay() {
-        return timestamp.atZone(java.time.ZoneOffset.UTC).getHour();
+        return hourOfDay(java.time.ZoneOffset.UTC);
+    }
+
+    /** Zone-aware hour-of-day for time-correlation bucketing. */
+    public int hourOfDay(java.time.ZoneId zoneId) {
+        return timestamp.atZone(Objects.requireNonNull(zoneId, "zoneId")).getHour();
     }
 
     @Override

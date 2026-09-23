@@ -52,7 +52,7 @@ class BackupPreWarmerTest {
                     10));
         }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store);
+        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         analyzer.analyzeAll();
 
         Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
@@ -65,19 +65,23 @@ class BackupPreWarmerTest {
         MonitoringThreadFactory tf = new MonitoringThreadFactory("test-mon", "t");
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(tf);
         PoolMetrics metrics = new PoolMetrics();
+        com.college.pap.pool.PoolConfig config = new com.college.pap.pool.PoolConfig();
+        config.setZoneId(ZoneOffset.UTC);
+        config.setHighRiskThreshold(0.55);
+        config.setPreWarmLeadMinutes(15);
+        config.setWarmPoolSize(5);
 
         BackupPreWarmer preWarmer = new BackupPreWarmer(
                 registry,
                 connectors,
                 analyzer,
-                new PredictionEngine(com.college.pap.prediction.RiskWeights.defaults(), clock),
+                new PredictionEngine(config, clock),
                 new ConnectionValidator(),
                 warmPool,
                 metrics,
+                store,
                 scheduler,
-                0.55,
-                15,
-                5,
+                config,
                 clock);
 
         preWarmer.tick();

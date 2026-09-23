@@ -15,23 +15,27 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Layer 1 — Pattern learning with Laplace-smoothed hourly rates
- * and per-hour sample counts (so a single failure cannot mark an hour 100% bad).
+ * Layer 1 — Pattern learning with incremental hourly stats.
+ * First {@code minHourSamples} observations use a plain mean (Laplace only while
+ * still under that threshold); afterwards EWMA with alpha 0.35.
  */
 public final class PatternAnalyzer {
+
+    public static final double DEFAULT_EWMA_ALPHA = 0.35;
+    public static final int DEFAULT_MIN_HOUR_SAMPLES = 5;
 
     private final double ewmaAlpha;
     private final int recentWindow;
     private final int clusterThreshold;
+    private final int minHourSamples;
     private final ZoneId zoneId;
 
     private final FailureHistoryStore historyStore;
     private final Map<EndpointId, EndpointRiskProfile> profiles = new ConcurrentHashMap<>();
-    /** Running per-hour success/failure counters (survive buffer eviction conceptually for rates). */
-    private final Map<EndpointId, HourlyCounters> counters = new ConcurrentHashMap<>();
+    private final Map<EndpointId, HourlyStats> counters = new ConcurrentHashMap<>();
 
     public PatternAnalyzer(FailureHistoryStore historyStore) {
-        this(historyStore, 0.35, 20, 2, ZoneId.systemDefault());
+        this(historyStore, DEFAULT_EWMA_ALPHA, 20, 2, ZoneId.systemDefault());
     }
 
     public PatternAnalyzer(
@@ -39,6 +43,16 @@ public final class PatternAnalyzer {
             double ewmaAlpha,
             int recentWindow,
             int clusterThreshold,
+            ZoneId zoneId) {
+        this(historyStore, ewmaAlpha, recentWindow, clusterThreshold, DEFAULT_MIN_HOUR_SAMPLES, zoneId);
+    }
+
+    public PatternAnalyzer(
+            FailureHistoryStore historyStore,
+            double ewmaAlpha,
+            int recentWindow,
+            int clusterThreshold,
+            int minHourSamples,
             ZoneId zoneId) {
         this.historyStore = Objects.requireNonNull(historyStore, "historyStore");
         if (ewmaAlpha <= 0.0 || ewmaAlpha > 1.0) {
@@ -50,9 +64,13 @@ public final class PatternAnalyzer {
         if (clusterThreshold < 1) {
             throw new IllegalArgumentException("clusterThreshold must be >= 1");
         }
+        if (minHourSamples < 1) {
+            throw new IllegalArgumentException("minHourSamples must be >= 1");
+        }
         this.ewmaAlpha = ewmaAlpha;
         this.recentWindow = recentWindow;
         this.clusterThreshold = clusterThreshold;
+        this.minHourSamples = minHourSamples;
         this.zoneId = Objects.requireNonNull(zoneId, "zoneId");
     }
 
@@ -64,13 +82,8 @@ public final class PatternAnalyzer {
     public void observe(ConnectionAttempt attempt) {
         Objects.requireNonNull(attempt);
         int hour = attempt.timestamp().atZone(zoneId).getHour();
-        HourlyCounters c = counters.computeIfAbsent(attempt.endpointId(), id -> new HourlyCounters());
-        if (attempt.isFailure()) {
-            c.failures[hour]++;
-        } else {
-            c.successes[hour]++;
-        }
-        c.total[hour]++;
+        HourlyStats c = counters.computeIfAbsent(attempt.endpointId(), id -> new HourlyStats());
+        c.record(hour, attempt.isFailure(), ewmaAlpha, minHourSamples);
     }
 
     public Map<EndpointId, EndpointRiskProfile> analyzeAll() {
@@ -84,10 +97,6 @@ public final class PatternAnalyzer {
     public EndpointRiskProfile analyze(EndpointId endpointId) {
         Objects.requireNonNull(endpointId, "endpointId");
         List<ConnectionAttempt> history = historyStore.getHistory(endpointId);
-        // Keep counters in sync if observe() wasn't called.
-        for (ConnectionAttempt a : history) {
-            // Rebuild from history for correctness when loading seeded data.
-        }
         ensureCountersFromHistory(endpointId, history);
         EndpointRiskProfile profile = buildProfile(endpointId, history, Instant.now());
         profiles.put(endpointId, profile);
@@ -103,15 +112,10 @@ public final class PatternAnalyzer {
     }
 
     private void ensureCountersFromHistory(EndpointId endpointId, List<ConnectionAttempt> history) {
-        HourlyCounters c = new HourlyCounters();
+        HourlyStats c = new HourlyStats();
         for (ConnectionAttempt attempt : history) {
             int hour = attempt.timestamp().atZone(zoneId).getHour();
-            if (attempt.isFailure()) {
-                c.failures[hour]++;
-            } else {
-                c.successes[hour]++;
-            }
-            c.total[hour]++;
+            c.record(hour, attempt.isFailure(), ewmaAlpha, minHourSamples);
         }
         counters.put(endpointId, c);
     }
@@ -120,25 +124,12 @@ public final class PatternAnalyzer {
             EndpointId endpointId,
             List<ConnectionAttempt> history,
             Instant computedAt) {
-        HourlyCounters c = counters.getOrDefault(endpointId, new HourlyCounters());
+        HourlyStats c = counters.getOrDefault(endpointId, new HourlyStats());
         double[] hourlyRates = new double[24];
         int[] hourlySamples = new int[24];
         for (int h = 0; h < 24; h++) {
-            hourlySamples[h] = c.total[h];
-            // Laplace / additive smoothing: (failures + 1) / (samples + 2)
-            // Prevents first failure from locking the hour at 100%.
-            if (c.total[h] == 0) {
-                hourlyRates[h] = 0.0;
-            } else {
-                hourlyRates[h] = (c.failures[h] + 1.0) / (c.total[h] + 2.0);
-            }
-        }
-        // Blend with EWMA from chronological walk for recency inside the hour.
-        double[] ewma = computeHourlyEwma(history);
-        for (int h = 0; h < 24; h++) {
-            if (c.total[h] > 0) {
-                hourlyRates[h] = 0.5 * hourlyRates[h] + 0.5 * ewma[h];
-            }
+            hourlySamples[h] = c.samples[h];
+            hourlyRates[h] = c.rate(h);
         }
 
         double recentRate = computeRecentFailureRate(history);
@@ -151,23 +142,6 @@ public final class PatternAnalyzer {
                 clusterState,
                 computedAt,
                 history.size());
-    }
-
-    private double[] computeHourlyEwma(List<ConnectionAttempt> history) {
-        double[] rates = new double[24];
-        boolean[] seen = new boolean[24];
-        for (ConnectionAttempt attempt : history) {
-            int hour = attempt.timestamp().atZone(zoneId).getHour();
-            double observation = attempt.isFailure() ? 1.0 : 0.0;
-            if (!seen[hour]) {
-                // Start from Laplace prior rather than raw first observation.
-                rates[hour] = 0.5 * observation + 0.5 * 0.5;
-                seen[hour] = true;
-            } else {
-                rates[hour] = ewmaAlpha * observation + (1.0 - ewmaAlpha) * rates[hour];
-            }
-        }
-        return rates;
     }
 
     private double computeRecentFailureRate(List<ConnectionAttempt> history) {
@@ -183,8 +157,14 @@ public final class PatternAnalyzer {
                 failures++;
             }
         }
-        // Laplace on recent window too
-        return (failures + 1.0) / (total + 2.0);
+        if (total == 0) {
+            return 0.0;
+        }
+        // Plain rate once we have enough evidence; Laplace only while sparse.
+        if (total < minHourSamples) {
+            return (failures + 1.0) / (total + 2.0);
+        }
+        return (double) failures / total;
     }
 
     private ClusterState detectClusters(List<ConnectionAttempt> history) {
@@ -214,9 +194,42 @@ public final class PatternAnalyzer {
         return new ClusterState(currentRun, averageRun, inCluster);
     }
 
-    private static final class HourlyCounters {
-        final int[] successes = new int[24];
+    /**
+     * Incremental per-hour stats: sample/failure counts plus EWMA after the
+     * warm-up plain-mean window.
+     */
+    static final class HourlyStats {
+        final int[] samples = new int[24];
         final int[] failures = new int[24];
-        final int[] total = new int[24];
+        final double[] ewma = new double[24];
+        final boolean[] ewmaActive = new boolean[24];
+
+        void record(int hour, boolean failure, double alpha, int minHourSamples) {
+            samples[hour]++;
+            if (failure) {
+                failures[hour]++;
+            }
+            double observation = failure ? 1.0 : 0.0;
+            int n = samples[hour];
+            if (n < minHourSamples) {
+                // Sparse evidence: Laplace only for the warm-up window.
+                ewma[hour] = (failures[hour] + 1.0) / (n + 2.0);
+                ewmaActive[hour] = false;
+            } else if (n == minHourSamples) {
+                // Switch to plain mean of the first minHourSamples observations.
+                ewma[hour] = (double) failures[hour] / n;
+                ewmaActive[hour] = true;
+            } else {
+                ewma[hour] = alpha * observation + (1.0 - alpha) * ewma[hour];
+                ewmaActive[hour] = true;
+            }
+        }
+
+        double rate(int hour) {
+            if (samples[hour] == 0) {
+                return 0.0;
+            }
+            return ewma[hour];
+        }
     }
 }

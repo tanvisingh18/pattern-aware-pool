@@ -22,11 +22,21 @@ public final class PoolMetrics {
     private final LongAdder connectFailures = new LongAdder();
     private final LongAdder recoveryProbesOk = new LongAdder();
     private final LongAdder recoveryProbesFail = new LongAdder();
+    private final LongAdder physicalConnects = new LongAdder();
+    private final LongAdder reuseHits = new LongAdder();
     private final AtomicLong totalCheckoutLatencyMs = new AtomicLong();
     private final Map<String, LongAdder> selectedEndpointCounts = new ConcurrentHashMap<>();
 
     public void recordConnectFailure() {
         connectFailures.increment();
+    }
+
+    public void recordPhysicalConnect() {
+        physicalConnects.increment();
+    }
+
+    public void recordReuseHit() {
+        reuseHits.increment();
     }
 
     public void recordRecoveryProbe(boolean success) {
@@ -104,6 +114,22 @@ public final class PoolMetrics {
         return connectFailures.sum();
     }
 
+    public long physicalConnects() {
+        return physicalConnects.sum();
+    }
+
+    public long reuseHits() {
+        return reuseHits.sum();
+    }
+
+    public long recoveryProbesOk() {
+        return recoveryProbesOk.sum();
+    }
+
+    public long recoveryProbesFail() {
+        return recoveryProbesFail.sum();
+    }
+
     public double successRate() {
         long total = totalRequests.sum();
         return total == 0 ? 0.0 : (double) successfulCheckouts.sum() / total;
@@ -129,8 +155,10 @@ public final class PoolMetrics {
                 + ", coldCreates=" + coldCreates()
                 + ", preWarmEvents=" + preWarmEvents()
                 + ", connectFailures=" + connectFailures()
-                + ", recoveryProbesOk=" + recoveryProbesOk.sum()
-                + ", recoveryProbesFail=" + recoveryProbesFail.sum()
+                + ", physicalConnects=" + physicalConnects()
+                + ", reuseHits=" + reuseHits()
+                + ", recoveryProbesOk=" + recoveryProbesOk()
+                + ", recoveryProbesFail=" + recoveryProbesFail()
                 + ", selected=" + selectedEndpointCounts()
                 + '}';
     }
@@ -148,6 +176,8 @@ public final class PoolMetrics {
         connectFailures.reset();
         recoveryProbesOk.reset();
         recoveryProbesFail.reset();
+        physicalConnects.reset();
+        reuseHits.reset();
         totalCheckoutLatencyMs.set(0);
         selectedEndpointCounts.clear();
     }

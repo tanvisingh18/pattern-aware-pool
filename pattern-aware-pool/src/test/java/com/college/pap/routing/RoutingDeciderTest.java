@@ -31,10 +31,15 @@ class RoutingDeciderTest {
     @BeforeEach
     void setUp() {
         store = new FailureHistoryStore(300);
-        analyzer = new PatternAnalyzer(store);
-        PredictionEngine engine = new PredictionEngine(RiskWeights.defaults());
+        analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
+        PredictionEngine engine = new PredictionEngine(
+                RiskWeights.defaults(),
+                java.time.Clock.fixed(Instant.parse("2026-07-26T14:00:00Z"), ZoneOffset.UTC));
         EndpointRegistry registry = EndpointRegistry.of(primary, backup);
-        decider = new RoutingDecider(registry, analyzer, engine, 0.55);
+        com.college.pap.pool.PoolConfig config = new com.college.pap.pool.PoolConfig();
+        config.setZoneId(ZoneOffset.UTC);
+        config.setHighRiskThreshold(0.55);
+        decider = new RoutingDecider(registry, analyzer, engine, config);
     }
 
     @Test

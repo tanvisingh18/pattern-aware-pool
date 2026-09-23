@@ -1,7 +1,11 @@
 package com.college.pap.pool;
 
+import com.college.pap.model.AttemptOutcome;
+import com.college.pap.model.ConnectionAttempt;
 import com.college.pap.model.EndpointId;
+import com.college.pap.model.FailureType;
 import com.college.pap.routing.EndpointRegistry;
+import com.college.pap.routing.RoutingDecision;
 import com.college.pap.util.MutableClock;
 import org.junit.jupiter.api.Test;
 
@@ -30,18 +34,30 @@ class ConnectionPoolIntegrationTest {
                 backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock));
 
         PoolConfig config = new PoolConfig();
+        config.setZoneId(ZoneOffset.UTC);
         config.setAnalyzerPeriodSeconds(3600);
         config.setPreWarmPeriodSeconds(3600);
+        config.setHotHourMinSamples(5);
+        config.setHotHourThreshold(0.50);
+        // Routing experiments: always physical-connect so flaky patterns are visible.
+        config.setReuseEnabled(false);
 
         try (ConnectionPool pool = ConnectionPool.predictive(registry, connectors, config, clock)) {
-            for (int h = 0; h < 24; h++) {
+            // Seed multi-day hour-14 failure history so hot-hour fires without relying
+            // on live connects during the learning loop (which would itself failover).
+            for (int d = 0; d < 5; d++) {
+                LocalDate hist = day.minusDays(5 - d);
                 for (int i = 0; i < 6; i++) {
-                    clock.set(day.atTime(h, i * 9).toInstant(ZoneOffset.UTC));
-                    try (PapConnection ignored = pool.getConnection()) {
-                        // learn
-                    } catch (Exception ignored) {
-                        // expected
-                    }
+                    pool.historyStore().record(ConnectionAttempt.failure(
+                            primary,
+                            hist.atTime(14, i * 5).toInstant(ZoneOffset.UTC),
+                            AttemptOutcome.TIMEOUT,
+                            FailureType.TIMEOUT,
+                            80));
+                    pool.historyStore().record(ConnectionAttempt.success(
+                            backup,
+                            hist.atTime(14, i * 5).toInstant(ZoneOffset.UTC),
+                            5));
                 }
             }
             pool.analyzer().analyzeAll();
@@ -51,10 +67,15 @@ class ConnectionPoolIntegrationTest {
 
             clock.set(day.atTime(14, 20).toInstant(ZoneOffset.UTC));
             int backupSelected = 0;
+            int hotHourTriggers = 0;
             for (int i = 0; i < 20; i++) {
                 try (PapConnection c = pool.getConnection()) {
                     if (backup.equals(c.endpointId())) {
                         backupSelected++;
+                    }
+                    if (c.routingDecision().isPresent()
+                            && c.routingDecision().get().trigger() == RoutingDecision.Trigger.HOT_HOUR) {
+                        hotHourTriggers++;
                     }
                 } catch (Exception ignored) {
                     // rare
@@ -63,6 +84,7 @@ class ConnectionPoolIntegrationTest {
 
             assertTrue(backupSelected >= 10,
                     "expected frequent preemptive use of backup during bad window, got " + backupSelected);
+            assertTrue(hotHourTriggers >= 1, "expected at least one HOT_HOUR trigger");
             assertTrue(pool.metrics().successRate() > 0.7);
         }
     }

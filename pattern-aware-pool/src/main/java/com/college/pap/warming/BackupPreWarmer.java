@@ -15,6 +15,7 @@ import com.college.pap.pool.PoolConfig;
 import com.college.pap.prediction.PredictionEngine;
 import com.college.pap.prediction.RiskScore;
 import com.college.pap.routing.EndpointRegistry;
+import com.college.pap.routing.HotHourRules;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -26,7 +27,6 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.DoubleSupplier;
 
 /**
  * Layer 3 — Pre-warming + primary recovery probes.
@@ -48,12 +48,12 @@ public final class BackupPreWarmer implements AutoCloseable {
     private final PoolMetrics metrics;
     private final FailureHistoryStore historyStore;
     private final ScheduledExecutorService scheduler;
-    private final DoubleSupplier thresholdSupplier;
     private final PoolConfig config;
     private final Clock clock;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final ConcurrentHashMap<EndpointId, Boolean> lastWarmState = new ConcurrentHashMap<>();
     private final AtomicLong lastProbeEpochMs = new AtomicLong(0);
+    private final AtomicBoolean primaryAvoided = new AtomicBoolean(false);
 
     public BackupPreWarmer(
             EndpointRegistry registry,
@@ -77,7 +77,6 @@ public final class BackupPreWarmer implements AutoCloseable {
         this.historyStore = Objects.requireNonNull(historyStore);
         this.scheduler = Objects.requireNonNull(scheduler);
         this.config = Objects.requireNonNull(config);
-        this.thresholdSupplier = config::highRiskThreshold;
         this.clock = Objects.requireNonNull(clock);
     }
 
@@ -94,11 +93,23 @@ public final class BackupPreWarmer implements AutoCloseable {
         EndpointId primary = registry.primary();
         boolean shouldWarm = isHighRiskSoon(primary, now);
         lastWarmState.put(primary, shouldWarm);
+        primaryAvoided.set(shouldWarm);
 
         if (shouldWarm) {
             preWarmBackup();
             maybeProbePrimary(now);
         }
+    }
+
+    /** Force a recovery probe (tests / manual), bypassing the interval gate. */
+    public void probePrimaryNow() {
+        Instant now = clock.instant();
+        lastProbeEpochMs.set(now.toEpochMilli() - config.recoveryProbeSeconds() * 1000L - 1);
+        maybeProbePrimary(now);
+    }
+
+    public boolean isPrimaryAvoided() {
+        return primaryAvoided.get();
     }
 
     private void preWarmBackup() {
@@ -137,7 +148,7 @@ public final class BackupPreWarmer implements AutoCloseable {
     private void maybeProbePrimary(Instant now) {
         long intervalMs = config.recoveryProbeSeconds() * 1000L;
         long last = lastProbeEpochMs.get();
-        if (now.toEpochMilli() - last < intervalMs) {
+        if (now.toEpochMilli() - last < intervalMs && last != 0) {
             return;
         }
         if (!lastProbeEpochMs.compareAndSet(last, now.toEpochMilli())) {
@@ -197,13 +208,12 @@ public final class BackupPreWarmer implements AutoCloseable {
             return false;
         }
 
-        double threshold = thresholdSupplier.getAsDouble();
-        int minSamples = config.hotHourMinSamples();
-        double hotRate = config.hotHourMinRate();
+        double threshold = config.highRiskThreshold();
 
         RiskScore nowScore = predictionEngine.score(profile, now);
         if (nowScore.isHighRisk(threshold)
-                || profile.isHotHour(nowScore.hourOfDay(), minSamples, hotRate)) {
+                || HotHourRules.isHot(profile, nowScore.hourOfDay(), config)
+                || profile.clusterState().currentRunLength() >= config.clusterAvoidRun()) {
             return true;
         }
 
@@ -212,7 +222,7 @@ public final class BackupPreWarmer implements AutoCloseable {
             Instant future = now.plus(m, ChronoUnit.MINUTES);
             RiskScore futureScore = predictionEngine.score(profile, future);
             if (futureScore.isHighRisk(threshold)
-                    || profile.isHotHour(futureScore.hourOfDay(), minSamples, hotRate)) {
+                    || HotHourRules.isHot(profile, futureScore.hourOfDay(), config)) {
                 return true;
             }
         }

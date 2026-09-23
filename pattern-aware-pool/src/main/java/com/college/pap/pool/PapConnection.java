@@ -1,6 +1,7 @@
 package com.college.pap.pool;
 
 import com.college.pap.model.EndpointId;
+import com.college.pap.routing.RoutingDecision;
 
 import java.sql.Connection;
 import java.time.Instant;
@@ -23,6 +24,7 @@ public final class PapConnection implements AutoCloseable {
     private final Instant createdAt;
     private final boolean preWarmed;
     private volatile IdleConnectionPool owner;
+    private volatile RoutingDecision routingDecision;
 
     public PapConnection(EndpointId endpointId, Object nativeHandle, Runnable onClose, boolean preWarmed) {
         this(endpointId, nativeHandle, onClose, preWarmed, null);
@@ -85,6 +87,14 @@ public final class PapConnection implements AutoCloseable {
         if (!destroyed.get()) {
             checkedOut.set(true);
         }
+    }
+
+    public void setRoutingDecision(RoutingDecision routingDecision) {
+        this.routingDecision = routingDecision;
+    }
+
+    public Optional<RoutingDecision> routingDecision() {
+        return Optional.ofNullable(routingDecision);
     }
 
     public Optional<Connection> unwrapJdbc() {

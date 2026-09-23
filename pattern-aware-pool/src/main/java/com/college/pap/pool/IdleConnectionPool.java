@@ -5,6 +5,8 @@ import com.college.pap.model.FailureType;
 import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.BooleanSupplier;
 
 /**
  * Per-endpoint idle connection pool. Caps concurrent checkouts with a
@@ -17,11 +19,23 @@ public final class IdleConnectionPool {
     private final int maxSize;
     private final Semaphore permits;
     private final ArrayDeque<PapConnection> idle = new ArrayDeque<>();
+    private final BooleanSupplier reuseEnabled;
+    private final LongAdder physicalConnects = new LongAdder();
+    private final LongAdder reuseHits = new LongAdder();
     private volatile boolean drained;
 
     public IdleConnectionPool(EndpointConnector connector, ConnectionValidator validator, int maxSize) {
+        this(connector, validator, maxSize, () -> true);
+    }
+
+    public IdleConnectionPool(
+            EndpointConnector connector,
+            ConnectionValidator validator,
+            int maxSize,
+            BooleanSupplier reuseEnabled) {
         this.connector = Objects.requireNonNull(connector, "connector");
         this.validator = Objects.requireNonNull(validator, "validator");
+        this.reuseEnabled = Objects.requireNonNull(reuseEnabled, "reuseEnabled");
         if (maxSize < 1) {
             throw new IllegalArgumentException("maxSize must be >= 1");
         }
@@ -37,6 +51,14 @@ public final class IdleConnectionPool {
         return idle.size();
     }
 
+    public long physicalConnects() {
+        return physicalConnects.sum();
+    }
+
+    public long reuseHits() {
+        return reuseHits.sum();
+    }
+
     /**
      * Borrows an idle connection or creates a new one via the endpoint connector.
      * Blocks if {@code maxSize} connections are already checked out.
@@ -50,9 +72,12 @@ public final class IdleConnectionPool {
                     "interrupted waiting for pool permit", FailureType.UNKNOWN);
         }
         try {
-            PapConnection recycled = pollValidIdle();
-            if (recycled != null) {
-                return recycled;
+            if (reuseEnabled.getAsBoolean()) {
+                PapConnection recycled = pollValidIdle();
+                if (recycled != null) {
+                    reuseHits.increment();
+                    return recycled;
+                }
             }
             return createNew();
         } catch (EndpointConnector.ConnectionFailedException e) {
@@ -90,7 +115,10 @@ public final class IdleConnectionPool {
         Objects.requireNonNull(connection, "connection");
         boolean kept = false;
         synchronized (this) {
-            if (!drained && idle.size() < maxSize && validator.validate(connection)) {
+            if (reuseEnabled.getAsBoolean()
+                    && !drained
+                    && idle.size() < maxSize
+                    && validator.validate(connection)) {
                 idle.addLast(connection);
                 kept = true;
             }
@@ -133,6 +161,7 @@ public final class IdleConnectionPool {
 
     private PapConnection createNew() throws EndpointConnector.ConnectionFailedException {
         PapConnection created = connector.connect();
+        physicalConnects.increment();
         created.bindOwner(this);
         created.prepareForCheckout();
         return created;

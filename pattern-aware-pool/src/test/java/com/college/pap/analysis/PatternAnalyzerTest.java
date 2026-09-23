@@ -35,11 +35,13 @@ class PatternAnalyzerTest {
             store.record(ConnectionAttempt.success(endpoint, ts, 10));
         }
 
-        PatternAnalyzer analyzer = new PatternAnalyzer(store);
+        PatternAnalyzer analyzer = new PatternAnalyzer(store, 0.35, 20, 2, ZoneOffset.UTC);
         EndpointRiskProfile profile = analyzer.analyze(endpoint);
 
         assertTrue(profile.failureRateAtHour(14) > 0.8, "14:00 should look bad");
         assertEquals(0.0, profile.failureRateAtHour(9), 0.001, "09:00 should be clean");
+        assertTrue(profile.samplesAtHour(14) >= 10);
+        assertTrue(profile.isHotHour(14, 5, 0.50));
     }
 
     @Test

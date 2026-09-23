@@ -76,16 +76,32 @@ public final class JdbcEndpointConnector implements EndpointConnector {
     private static FailureType classify(SQLException e) {
         String state = e.getSQLState() == null ? "" : e.getSQLState();
         String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
-        if (state.startsWith("08") || msg.contains("connection refused") || msg.contains("network")) {
+        Throwable cause = e.getCause();
+        String causeMsg = cause == null || cause.getMessage() == null
+                ? ""
+                : cause.getMessage().toLowerCase();
+        String combined = msg + " " + causeMsg;
+        if (state.startsWith("08")
+                || combined.contains("connection refused")
+                || combined.contains("connection is broken")
+                || combined.contains("network")
+                || combined.contains("socket")
+                || combined.contains("unreachable")
+                || combined.contains("operation not permitted")
+                || combined.contains("refused")
+                || cause instanceof java.net.ConnectException
+                || cause instanceof java.net.SocketException
+                || cause instanceof java.net.NoRouteToHostException
+                || cause instanceof java.net.UnknownHostException) {
             return FailureType.NETWORK_UNREACHABLE;
         }
-        if (msg.contains("timeout") || msg.contains("timed out")) {
+        if (combined.contains("timeout") || combined.contains("timed out")) {
             return FailureType.TIMEOUT;
         }
-        if (state.startsWith("28") || msg.contains("auth") || msg.contains("password")) {
+        if (state.startsWith("28") || combined.contains("auth") || combined.contains("password")) {
             return FailureType.AUTH_FAILURE;
         }
-        if (msg.contains("ssl")) {
+        if (combined.contains("ssl")) {
             return FailureType.SSL_RESET;
         }
         return FailureType.UNKNOWN;

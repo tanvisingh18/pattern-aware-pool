@@ -11,32 +11,30 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.DoubleSupplier;
+import java.util.function.Supplier;
 
 /**
- * Layer 2 — Predictive rerouting with LIVE threshold + hot-hour rule.
+ * Layer 2 — Predictive rerouting with LIVE threshold + hot-hour + live-cluster rules.
  *
- * Failover if:
+ * Failover if ANY of:
  * <ul>
- *   <li>weighted risk ≥ threshold, OR</li>
- *   <li>hot hour: samplesAtHour ≥ minSamples AND failureRateAtHour ≥ hotHourRate</li>
+ *   <li>weighted risk ≥ highRiskThreshold</li>
+ *   <li>hot hour: samples ≥ minSamples AND failureRate ≥ hotHourThreshold</li>
+ *   <li>live cluster: currentRunLength ≥ clusterAvoidRun</li>
  * </ul>
- * Hot-hour alone can preempt before any live failure in a known bad window.
  */
 public final class RoutingDecider {
 
     private final EndpointRegistry registry;
     private final PatternAnalyzer analyzer;
     private final PredictionEngine predictionEngine;
-    private final DoubleSupplier thresholdSupplier;
-    private final int hotHourMinSamples;
-    private final double hotHourMinRate;
+    private final Supplier<PoolConfig> configSupplier;
 
     public RoutingDecider(
             EndpointRegistry registry,
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine) {
-        this(registry, analyzer, predictionEngine, () -> 0.55, 5, 0.50);
+        this(registry, analyzer, predictionEngine, new PoolConfig());
     }
 
     public RoutingDecider(
@@ -44,7 +42,7 @@ public final class RoutingDecider {
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine,
             double highRiskThreshold) {
-        this(registry, analyzer, predictionEngine, () -> highRiskThreshold, 5, 0.50);
+        this(registry, analyzer, predictionEngine, configWithThreshold(highRiskThreshold));
     }
 
     public RoutingDecider(
@@ -52,32 +50,25 @@ public final class RoutingDecider {
             PatternAnalyzer analyzer,
             PredictionEngine predictionEngine,
             PoolConfig config) {
-        this(
-                registry,
-                analyzer,
-                predictionEngine,
-                config::highRiskThreshold,
-                config.hotHourMinSamples(),
-                config.hotHourMinRate());
-    }
-
-    public RoutingDecider(
-            EndpointRegistry registry,
-            PatternAnalyzer analyzer,
-            PredictionEngine predictionEngine,
-            DoubleSupplier thresholdSupplier,
-            int hotHourMinSamples,
-            double hotHourMinRate) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.analyzer = Objects.requireNonNull(analyzer, "analyzer");
         this.predictionEngine = Objects.requireNonNull(predictionEngine, "predictionEngine");
-        this.thresholdSupplier = Objects.requireNonNull(thresholdSupplier, "thresholdSupplier");
-        this.hotHourMinSamples = hotHourMinSamples;
-        this.hotHourMinRate = hotHourMinRate;
+        Objects.requireNonNull(config, "config");
+        this.configSupplier = () -> config;
+    }
+
+    private static PoolConfig configWithThreshold(double highRiskThreshold) {
+        PoolConfig cfg = new PoolConfig();
+        cfg.setHighRiskThreshold(highRiskThreshold);
+        return cfg;
     }
 
     public double highRiskThreshold() {
-        return thresholdSupplier.getAsDouble();
+        return configSupplier.get().highRiskThreshold();
+    }
+
+    public PoolConfig config() {
+        return configSupplier.get();
     }
 
     public RoutingDecision decide() {
@@ -95,23 +86,32 @@ public final class RoutingDecider {
             throw new IllegalArgumentException("unknown endpoint: " + requested);
         }
 
-        double threshold = thresholdSupplier.getAsDouble();
+        PoolConfig config = configSupplier.get();
         Map<EndpointId, RiskScore> scores = scoreRegistered(at);
         RiskScore requestedScore = scores.get(requested);
         EndpointRiskProfile requestedProfile = resolveProfile(requested);
 
         if (registry.all().size() == 1) {
             return new RoutingDecision(
-                    requested, requested, RoutingDecision.Reason.SINGLE_ENDPOINT, requestedScore, scores);
+                    requested,
+                    requested,
+                    RoutingDecision.Reason.SINGLE_ENDPOINT,
+                    RoutingDecision.Trigger.NONE,
+                    requestedScore,
+                    scores);
         }
 
-        boolean hotHour = requestedProfile != null
-                && requestedProfile.isHotHour(requestedScore.hourOfDay(), hotHourMinSamples, hotHourMinRate);
-        boolean highRisk = requestedScore.isHighRisk(threshold) || hotHour;
+        RoutingDecision.Trigger trigger = classifyTrigger(requestedProfile, requestedScore, config);
+        boolean avoid = trigger != RoutingDecision.Trigger.NONE;
 
-        if (!highRisk) {
+        if (!avoid) {
             return new RoutingDecision(
-                    requested, requested, RoutingDecision.Reason.PRIMARY_OK, requestedScore, scores);
+                    requested,
+                    requested,
+                    RoutingDecision.Reason.PRIMARY_OK,
+                    RoutingDecision.Trigger.NONE,
+                    requestedScore,
+                    scores);
         }
 
         EndpointId bestHealthy = null;
@@ -122,9 +122,8 @@ public final class RoutingDecider {
         for (EndpointId candidate : registry.all()) {
             RiskScore score = scores.get(candidate);
             EndpointRiskProfile profile = resolveProfile(candidate);
-            boolean candidateHot = profile != null
-                    && profile.isHotHour(score.hourOfDay(), hotHourMinSamples, hotHourMinRate);
-            boolean candidateHigh = score.isHighRisk(threshold) || candidateHot;
+            RoutingDecision.Trigger candidateTrigger = classifyTrigger(profile, score, config);
+            boolean candidateAvoid = candidateTrigger != RoutingDecision.Trigger.NONE;
 
             boolean better = score.score() < leastBadScore.score()
                     || (score.score() == leastBadScore.score()
@@ -134,7 +133,7 @@ public final class RoutingDecider {
                 leastBad = candidate;
                 leastBadScore = score;
             }
-            if (!candidateHigh) {
+            if (!candidateAvoid) {
                 if (bestHealthyScore == null || score.score() < bestHealthyScore.score()) {
                     bestHealthy = candidate;
                     bestHealthyScore = score;
@@ -147,6 +146,7 @@ public final class RoutingDecider {
                     requested,
                     bestHealthy,
                     RoutingDecision.Reason.PREEMPTIVE_FAILOVER,
+                    trigger,
                     bestHealthyScore,
                     scores);
         }
@@ -155,8 +155,29 @@ public final class RoutingDecider {
                 requested,
                 leastBad,
                 RoutingDecision.Reason.DEGRADED_MODE,
+                trigger,
                 leastBadScore,
                 scores);
+    }
+
+    /**
+     * Attribution order: HOT_HOUR → LIVE_CLUSTER → SCORE (first match wins).
+     * Hot-hour is checked first so known bad windows report HOT_HOUR even when
+     * the composite score is also elevated.
+     */
+    static RoutingDecision.Trigger classifyTrigger(
+            EndpointRiskProfile profile, RiskScore score, PoolConfig config) {
+        if (profile != null && HotHourRules.isHot(profile, score.hourOfDay(), config)) {
+            return RoutingDecision.Trigger.HOT_HOUR;
+        }
+        if (profile != null
+                && profile.clusterState().currentRunLength() >= config.clusterAvoidRun()) {
+            return RoutingDecision.Trigger.LIVE_CLUSTER;
+        }
+        if (score.isHighRisk(config.highRiskThreshold())) {
+            return RoutingDecision.Trigger.SCORE;
+        }
+        return RoutingDecision.Trigger.NONE;
     }
 
     private Map<EndpointId, RiskScore> scoreRegistered(Instant at) {
