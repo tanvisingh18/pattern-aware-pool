@@ -1,0 +1,89 @@
+package com.college.pap.warming;
+
+import com.college.pap.analysis.PatternAnalyzer;
+import com.college.pap.history.FailureHistoryStore;
+import com.college.pap.model.AttemptOutcome;
+import com.college.pap.model.ConnectionAttempt;
+import com.college.pap.model.EndpointId;
+import com.college.pap.model.FailureType;
+import com.college.pap.monitoring.MonitoringThreadFactory;
+import com.college.pap.monitoring.PoolMetrics;
+import com.college.pap.pool.ConnectionValidator;
+import com.college.pap.pool.EndpointConnector;
+import com.college.pap.pool.FlakyEndpointConnector;
+import com.college.pap.prediction.PredictionEngine;
+import com.college.pap.routing.EndpointRegistry;
+import com.college.pap.util.MutableClock;
+import org.junit.jupiter.api.Test;
+
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class BackupPreWarmerTest {
+
+    @Test
+    void preWarmsBackupBeforeBadHour() {
+        LocalDate day = LocalDate.of(2026, 7, 26);
+        MutableClock clock = MutableClock.utc(day.atTime(13, 50).toInstant(ZoneOffset.UTC));
+
+        EndpointId primary = new EndpointId("primary-db");
+        EndpointId backup = new EndpointId("backup-db");
+        EndpointRegistry registry = EndpointRegistry.of(primary, backup);
+
+        FailureHistoryStore store = new FailureHistoryStore(300);
+        for (int i = 0; i < 20; i++) {
+            store.record(ConnectionAttempt.failure(
+                    primary,
+                    day.atTime(14, i).toInstant(ZoneOffset.UTC),
+                    AttemptOutcome.TIMEOUT,
+                    FailureType.TIMEOUT,
+                    50));
+        }
+        for (int i = 0; i < 20; i++) {
+            store.record(ConnectionAttempt.success(
+                    backup,
+                    day.atTime(13, i).toInstant(ZoneOffset.UTC),
+                    10));
+        }
+
+        PatternAnalyzer analyzer = new PatternAnalyzer(store);
+        analyzer.analyzeAll();
+
+        Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
+        connectors.put(primary, FlakyEndpointConnector.forTests(
+                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock));
+        connectors.put(backup, FlakyEndpointConnector.forTests(
+                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock));
+
+        WarmPool warmPool = new WarmPool(backup, 5);
+        MonitoringThreadFactory tf = new MonitoringThreadFactory("test-mon", "t");
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(tf);
+        PoolMetrics metrics = new PoolMetrics();
+
+        BackupPreWarmer preWarmer = new BackupPreWarmer(
+                registry,
+                connectors,
+                analyzer,
+                new PredictionEngine(com.college.pap.prediction.RiskWeights.defaults(), clock),
+                new ConnectionValidator(),
+                warmPool,
+                metrics,
+                scheduler,
+                0.55,
+                15,
+                5,
+                clock);
+
+        preWarmer.tick();
+        assertTrue(warmPool.size() > 0, "backup should be pre-warmed before 14:00");
+        assertTrue(metrics.preWarmEvents() > 0);
+        preWarmer.close();
+        scheduler.shutdownNow();
+    }
+}

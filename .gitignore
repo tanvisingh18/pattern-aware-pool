@@ -1,0 +1,16 @@
+.tools/
+**/target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+*.class
+*.log
+
+.venv/
+data/
+*.mv.db
+*.trace.db
+
