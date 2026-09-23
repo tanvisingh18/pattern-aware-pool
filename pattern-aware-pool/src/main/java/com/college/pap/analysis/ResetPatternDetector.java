@@ -48,10 +48,21 @@ public final class ResetPatternDetector {
         return state == null ? 0 : state.currentSuccessStreak;
     }
 
-    /** True when a stable period P is known and streak ≥ P−1. */
+    /** True when a stable period P is known, streak ≥ P−1, and prediction not yet consumed. */
     public boolean preferBackup(EndpointId endpointId) {
         EndpointResetState state = states.get(endpointId);
         return state != null && state.preferBackup();
+    }
+
+    /**
+     * Call after a {@code RESET_PREDICTED} failover so avoidance applies to the
+     * next physical connect only, not forever while the streak stays frozen.
+     */
+    public void consumePrediction(EndpointId endpointId) {
+        EndpointResetState state = states.get(endpointId);
+        if (state != null) {
+            state.consumePrediction();
+        }
     }
 
     public List<Integer> completedStreaks(EndpointId endpointId) {
@@ -68,6 +79,7 @@ public final class ResetPatternDetector {
         private final Deque<Integer> completedStreaks = new ArrayDeque<>();
         private int currentSuccessStreak;
         private int detectedPeriod = -1;
+        private boolean predictionConsumed;
 
         synchronized void observe(boolean success) {
             if (success) {
@@ -82,10 +94,17 @@ public final class ResetPatternDetector {
                 recomputePeriod();
             }
             currentSuccessStreak = 0;
+            predictionConsumed = false;
         }
 
         synchronized boolean preferBackup() {
-            return detectedPeriod > 0 && currentSuccessStreak >= detectedPeriod - 1;
+            return detectedPeriod > 0
+                    && !predictionConsumed
+                    && currentSuccessStreak >= detectedPeriod - 1;
+        }
+
+        synchronized void consumePrediction() {
+            predictionConsumed = true;
         }
 
         private void recomputePeriod() {

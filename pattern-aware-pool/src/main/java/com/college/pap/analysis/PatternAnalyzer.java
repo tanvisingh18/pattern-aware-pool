@@ -126,10 +126,12 @@ public final class PatternAnalyzer {
             Instant computedAt) {
         HourlyStats c = counters.getOrDefault(endpointId, new HourlyStats());
         double[] hourlyRates = new double[24];
+        double[] hourlyPlainRates = new double[24];
         int[] hourlySamples = new int[24];
         for (int h = 0; h < 24; h++) {
             hourlySamples[h] = c.samples[h];
             hourlyRates[h] = c.rate(h);
+            hourlyPlainRates[h] = c.plainRate(h);
         }
 
         double recentRate = computeRecentFailureRate(history);
@@ -137,6 +139,7 @@ public final class PatternAnalyzer {
         return new EndpointRiskProfile(
                 endpointId,
                 hourlyRates,
+                hourlyPlainRates,
                 hourlySamples,
                 recentRate,
                 clusterState,
@@ -230,6 +233,13 @@ public final class PatternAnalyzer {
                 return 0.0;
             }
             return ewma[hour];
+        }
+
+        double plainRate(int hour) {
+            if (samples[hour] == 0) {
+                return 0.0;
+            }
+            return (double) failures[hour] / samples[hour];
         }
     }
 }

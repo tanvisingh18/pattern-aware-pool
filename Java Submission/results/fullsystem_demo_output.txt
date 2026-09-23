@@ -1,0 +1,38 @@
+
+=== Pattern-Aware Pool — Full System Demo (Layers 1–3) ===
+
+1) Learning phase across 24h...
+   primary-db recentFail=20% hour14=74% cluster=ClusterState{run=0, avgRun=2.45, inCluster=false}
+   backup-db recentFail=0% hour14=0% cluster=ClusterState{run=0, avgRun=0.00, inCluster=false}
+
+2) Pre-warm check at 13:50 (before bad window)...
+   Warm pool size : 5
+   Pre-warm events: 29
+
+3) Checkout at 09:15 (healthy hour)...
+   RiskScore{primary-db @ 09:00 = 0.04 (tod=0.01, cluster=0.00, recent=0.20)}
+   RiskScore{backup-db @ 09:00 = 0.15 (tod=0.33, cluster=0.00, recent=0.00)}
+   Selected: primary-db preWarmed=false reason=PRIMARY_OK trigger=NONE risk=0.04
+
+4) Checkout at 14:20 (predicted bad window)...
+   RiskScore{primary-db @ 14:00 = 0.36 (tod=0.74, cluster=0.00, recent=0.15)}
+   RiskScore{backup-db @ 14:00 = 0.00 (tod=0.00, cluster=0.00, recent=0.00)}
+   Selected: backup-db preWarmed=true reason=PREEMPTIVE_FAILOVER trigger=HOT_HOUR risk=0.00
+   RiskScore{primary-db @ 14:00 = 0.36 (tod=0.74, cluster=0.00, recent=0.15)}
+   RiskScore{backup-db @ 14:00 = 0.00 (tod=0.00, cluster=0.00, recent=0.00)}
+   Selected: backup-db preWarmed=true reason=PREEMPTIVE_FAILOVER trigger=HOT_HOUR risk=0.00
+   RiskScore{primary-db @ 14:00 = 0.36 (tod=0.74, cluster=0.00, recent=0.15)}
+   RiskScore{backup-db @ 14:00 = 0.00 (tod=0.00, cluster=0.00, recent=0.00)}
+   Selected: backup-db preWarmed=true reason=PREEMPTIVE_FAILOVER trigger=HOT_HOUR risk=0.00
+   RiskScore{primary-db @ 14:00 = 0.36 (tod=0.74, cluster=0.00, recent=0.15)}
+   RiskScore{backup-db @ 14:00 = 0.00 (tod=0.00, cluster=0.00, recent=0.00)}
+   Selected: backup-db preWarmed=true reason=PREEMPTIVE_FAILOVER trigger=HOT_HOUR risk=0.00
+   RiskScore{primary-db @ 14:00 = 0.36 (tod=0.74, cluster=0.00, recent=0.15)}
+   RiskScore{backup-db @ 14:00 = 0.00 (tod=0.00, cluster=0.00, recent=0.00)}
+   Selected: backup-db preWarmed=true reason=PREEMPTIVE_FAILOVER trigger=HOT_HOUR risk=0.00
+
+5) Metrics snapshot:
+   PoolMetrics{requests=294, successRate=100.0%, avgLatencyMs=22.0, preemptiveFailovers=29, warmHits=29, coldCreates=265, preWarmEvents=29, connectFailures=33, physicalConnects=265, reuseHits=0, recoveryProbesOk=14, recoveryProbesFail=16, selected={backup-db=62, primary-db=232}}
+   Monitoring ThreadGroup: pap-monitoring
+
+Demo complete. Next: mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner

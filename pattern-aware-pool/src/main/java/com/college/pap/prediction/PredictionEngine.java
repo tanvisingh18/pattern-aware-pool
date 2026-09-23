@@ -104,6 +104,7 @@ public final class PredictionEngine {
         return new EndpointRiskProfile(
                 endpointId,
                 new double[24],
+                new double[24],
                 new int[24],
                 0.0,
                 ClusterState.idle(),

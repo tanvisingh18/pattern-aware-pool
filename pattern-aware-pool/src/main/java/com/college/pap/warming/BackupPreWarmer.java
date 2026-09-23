@@ -91,12 +91,22 @@ public final class BackupPreWarmer implements AutoCloseable {
         analyzer.analyzeAll();
 
         EndpointId primary = registry.primary();
+        EndpointRiskProfile profile = analyzer.getProfile(primary);
+        if (profile == null) {
+            profile = analyzer.analyze(primary);
+        }
         boolean shouldWarm = isHighRiskSoon(primary, now);
+        boolean clusterActive = profile != null
+                && profile.clusterState().currentRunLength() >= config.clusterAvoidRun();
         lastWarmState.put(primary, shouldWarm);
-        primaryAvoided.set(shouldWarm);
+        primaryAvoided.set(shouldWarm || clusterActive);
 
         if (shouldWarm) {
             preWarmBackup();
+        }
+        // Probe while avoided for score/hot-hour OR while a live failure run is sticky,
+        // so successes can clear currentRunLength and traffic can return to primary.
+        if (shouldWarm || clusterActive) {
             maybeProbePrimary(now);
         }
     }

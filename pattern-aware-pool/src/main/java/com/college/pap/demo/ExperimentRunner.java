@@ -1,9 +1,6 @@
 package com.college.pap.demo;
 
-import com.college.pap.model.AttemptOutcome;
-import com.college.pap.model.ConnectionAttempt;
 import com.college.pap.model.EndpointId;
-import com.college.pap.model.FailureType;
 import com.college.pap.pool.ConnectionPool;
 import com.college.pap.pool.EndpointConnector;
 import com.college.pap.pool.FlakyEndpointConnector;
@@ -16,219 +13,425 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.Random;
 
 /**
- * Controlled experiments: Reactive baseline vs Predictive pool.
- * Seeds Layer-1 history directly, then measures a clean request window.
+ * Honest comparative experiments: REACTIVE vs CIRCUIT_BREAKER vs PREDICTIVE.
+ *
+ * <p>Learning drives 7 simulated days of traffic through the live connectors
+ * (no history seeding with day-8 answers). Day 8 measurement windows are clean
+ * after {@link com.college.pap.monitoring.PoolMetrics#reset()}. Latency is a
+ * simulated metric — connectors do not {@code Thread.sleep}.
  */
 public final class ExperimentRunner {
 
+    public static final int DEFAULT_SEEDS = 30;
+    public static final int LEARNING_DAYS = 7;
+    public static final int REQUESTS_PER_HOUR = 12;
+
     public record ResultRow(
+            int seed,
             String mode,
             String scenario,
             int requests,
             double successRate,
-            double avgLatencyMs,
+            long connectFailures,
+            long backupSelections,
             long preemptiveFailovers,
             long warmHits,
-            long checkoutFailures,
-            long connectFailures,
-            long backupSelections) {}
+            double meanCheckoutLatencySimMs) {}
+
+    public record SummaryRow(
+            String mode,
+            String scenario,
+            int n,
+            double meanConnectFailures,
+            double sdConnectFailures,
+            double meanSuccessRate,
+            double sdSuccessRate,
+            double meanBackupSelections,
+            double sdBackupSelections,
+            double meanPreemptiveFailovers,
+            double sdPreemptiveFailovers,
+            double meanWarmHits,
+            double sdWarmHits,
+            double meanLatencySimMs,
+            double sdLatencySimMs) {}
 
     public static void main(String[] args) throws Exception {
+        int seeds = DEFAULT_SEEDS;
+        if (args.length > 0) {
+            seeds = Integer.parseInt(args[0]);
+        }
+
         Path outDir = Path.of("docs", "results");
         Files.createDirectories(outDir);
 
+        writeBeforeFixesBaseline(outDir.resolve("before_fixes.csv"));
+
         List<ResultRow> rows = new ArrayList<>();
-        rows.addAll(runScenario("morning-healthy", 9, 15, 100));
-        rows.addAll(runScenario("afternoon-bad-window", 14, 20, 100));
-        rows.addAll(runScenario("evening-stable", 18, 0, 80));
+        long t0 = System.nanoTime();
+        for (int seed = 1; seed <= seeds; seed++) {
+            System.out.println("Seed " + seed + "/" + seeds + "...");
+            rows.addAll(runSeed(seed));
+        }
+        double elapsedSec = (System.nanoTime() - t0) / 1_000_000_000.0;
+        System.out.printf(Locale.US, "Completed %d seeds in %.1fs%n", seeds, elapsedSec);
 
-        writeCsv(outDir.resolve("experiment_results.csv"), rows);
-        writeMarkdown(outDir.resolve("experiment_results.md"), rows);
-        printSummary(rows);
+        writeRunsCsv(outDir.resolve("experiment_runs.csv"), rows);
+        List<SummaryRow> summary = summarize(rows);
+        writeSummaryCsv(outDir.resolve("experiment_summary.csv"), summary);
+        writeSummaryMd(outDir.resolve("experiment_summary.md"), summary, seeds, elapsedSec);
+
+        Path submissionResults = Path.of("..", "Java Submission", "results");
+        Files.createDirectories(submissionResults);
+        for (String name : List.of(
+                "before_fixes.csv",
+                "experiment_runs.csv",
+                "experiment_summary.csv",
+                "experiment_summary.md")) {
+            Files.copy(
+                    outDir.resolve(name),
+                    submissionResults.resolve(name),
+                    StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        printSummary(summary);
     }
 
-    private static List<ResultRow> runScenario(String name, int hour, int minute, int requests)
-            throws Exception {
-        return List.of(
-                runOnce("reactive", name, hour, minute, requests, false),
-                runOnce("predictive", name, hour, minute, requests, true));
+    static List<ResultRow> runSeed(int seed) throws Exception {
+        List<ResultRow> rows = new ArrayList<>();
+        for (String mode : List.of("reactive", "circuit_breaker", "predictive")) {
+            rows.addAll(runMode(seed, mode));
+        }
+        return rows;
     }
 
-    private static ResultRow runOnce(
-            String mode,
-            String scenario,
-            int hour,
-            int minute,
-            int requests,
-            boolean predictive) throws Exception {
-        LocalDate day = LocalDate.of(2026, 7, 26);
-        Instant start = LocalDateTime.of(2026, 7, 26, hour, minute).toInstant(ZoneOffset.UTC);
+    private static List<ResultRow> runMode(int seed, String mode) throws Exception {
+        LocalDate startDay = LocalDate.of(2026, 7, 1);
+        Instant start = startDay.atStartOfDay().toInstant(ZoneOffset.UTC);
         MutableClock clock = MutableClock.utc(start);
 
         EndpointId primary = new EndpointId("primary-db");
         EndpointId backup = new EndpointId("backup-db");
         EndpointRegistry registry = EndpointRegistry.of(primary, backup);
 
+        // Separate RNGs so primary/backup don't consume each other's stream.
+        Random primaryRng = new Random(seed * 1000L + 11);
+        Random backupRng = new Random(seed * 1000L + 29);
+
         Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
         connectors.put(primary, FlakyEndpointConnector.forTests(
-                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock));
+                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock, primaryRng));
         connectors.put(backup, FlakyEndpointConnector.forTests(
-                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock));
+                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock, backupRng));
 
+        PoolConfig config = experimentConfig();
+        ConnectionPool pool = switch (mode) {
+            case "predictive" -> ConnectionPool.predictiveManual(registry, connectors, config, clock);
+            case "circuit_breaker" -> ConnectionPool.circuitBreaker(registry, connectors, config, clock);
+            default -> ConnectionPool.reactiveBaseline(registry, connectors, config, clock);
+        };
+
+        try {
+            driveLearning(pool, clock, startDay);
+            LocalDate measureDay = startDay.plusDays(LEARNING_DAYS);
+            // Chronological day-8 windows so MutableClock / circuit state advance forward.
+            List<ResultRow> measured = new ArrayList<>();
+            measured.add(measure(pool, clock, seed, mode, "morning-healthy",
+                    measureDay.atTime(9, 15).toInstant(ZoneOffset.UTC), 100));
+            measured.add(measure(pool, clock, seed, mode, "bad-window",
+                    measureDay.atTime(14, 20).toInstant(ZoneOffset.UTC), 100));
+            measured.add(measure(pool, clock, seed, mode, "evening-stable",
+                    measureDay.atTime(18, 0).toInstant(ZoneOffset.UTC), 80));
+            return measured;
+        } finally {
+            pool.close();
+        }
+    }
+
+    private static PoolConfig experimentConfig() {
         PoolConfig config = new PoolConfig();
+        config.setZoneId(ZoneOffset.UTC);
+        config.setReuseEnabled(false);
+        config.setHistoryCapacity(8000);
+        config.setWarmPoolSize(8);
+        config.setPreWarmLeadMinutes(15);
+        config.setHotHourMinSamples(5);
+        config.setHotHourThreshold(0.50);
+        config.setHighRiskThreshold(0.55);
+        config.setClusterAvoidRun(3);
+        config.setRecoveryProbeSeconds(5);
         config.setAnalyzerPeriodSeconds(3600);
         config.setPreWarmPeriodSeconds(3600);
-        config.setPreWarmLeadMinutes(15);
-        config.setWarmPoolSize(8);
+        return config;
+    }
 
-        ConnectionPool pool = predictive
-                ? ConnectionPool.predictive(registry, connectors, config, clock)
-                : ConnectionPool.reactiveBaseline(registry, connectors, config, clock);
+    /**
+     * 7 days × 24 hours × 12 requests. Clock advances in 30s steps with
+     * {@code backgroundTick()} so predictive pre-warm/recovery can fire.
+     * Does <b>not</b> seed FailureHistoryStore with fabricated day-8 answers.
+     */
+    private static void driveLearning(ConnectionPool pool, MutableClock clock, LocalDate startDay) {
+        Instant cursor = startDay.atStartOfDay().toInstant(ZoneOffset.UTC);
+        Instant end = startDay.plusDays(LEARNING_DAYS).atStartOfDay().toInstant(ZoneOffset.UTC);
+        int reqThisHour = 0;
+        int hourBucket = -1;
 
-        seedHistory(pool, primary, backup, day);
-        pool.analyzer().analyzeAll();
+        while (cursor.isBefore(end)) {
+            clock.set(cursor);
+            pool.backgroundTick();
 
-        if (predictive && hour == 14) {
-            clock.set(day.atTime(13, 50).toInstant(ZoneOffset.UTC));
-            pool.preWarmer().tick();
-            clock.set(start);
+            int hour = cursor.atZone(ZoneOffset.UTC).getHour()
+                    + cursor.atZone(ZoneOffset.UTC).getDayOfYear() * 24;
+            if (hour != hourBucket) {
+                hourBucket = hour;
+                reqThisHour = 0;
+            }
+            // Space 12 requests evenly across the hour (every 5 minutes).
+            int minute = cursor.atZone(ZoneOffset.UTC).getMinute();
+            int second = cursor.atZone(ZoneOffset.UTC).getSecond();
+            if (second == 0 && minute % 5 == 0 && reqThisHour < REQUESTS_PER_HOUR) {
+                try (PapConnection ignored = pool.getConnection()) {
+                    // learning traffic
+                } catch (EndpointConnector.ConnectionFailedException ignored) {
+                    // expected in bad windows
+                }
+                reqThisHour++;
+            }
+            cursor = cursor.plusSeconds(30);
         }
+        pool.analyzer().analyzeAll();
+    }
 
-        // Important: do not count learning/pre-warm in measured metrics.
+    private static ResultRow measure(
+            ConnectionPool pool,
+            MutableClock clock,
+            int seed,
+            String mode,
+            String scenario,
+            Instant windowStart,
+            int requests) {
+        // Brief pre-warm opportunity for predictive before bad window.
+        if ("predictive".equals(mode) && "bad-window".equals(scenario)) {
+            clock.set(windowStart.minus(Duration.ofMinutes(30)));
+            pool.backgroundTick();
+            clock.set(windowStart.minus(Duration.ofMinutes(10)));
+            pool.backgroundTick();
+        }
         pool.metrics().reset();
 
         for (int i = 0; i < requests; i++) {
-            clock.set(start.plusSeconds(i));
+            clock.set(windowStart.plusSeconds(i));
+            if ("predictive".equals(mode)) {
+                pool.backgroundTick();
+            }
             try (PapConnection ignored = pool.getConnection()) {
-                // ok
+                // measured
             } catch (EndpointConnector.ConnectionFailedException ignored) {
-                // counted
+                // counted in metrics
             }
         }
 
         var m = pool.metrics();
         long backupSelections = m.selectedEndpointCounts().getOrDefault("backup-db", 0L);
-        ResultRow row = new ResultRow(
+        return new ResultRow(
+                seed,
                 mode,
                 scenario,
                 requests,
                 m.successRate(),
-                m.averageLatencyMs(),
+                m.connectFailures(),
+                backupSelections,
                 m.preemptiveFailovers(),
                 m.warmHits(),
-                m.failedCheckouts(),
-                m.connectFailures(),
-                backupSelections);
-        pool.close();
-        return row;
+                m.averageLatencyMs());
     }
 
-    /** Directly write patterned history so predictive mode has something to learn. */
-    private static void seedHistory(
-            ConnectionPool pool,
-            EndpointId primary,
-            EndpointId backup,
-            LocalDate day) {
-        ThreadLocalRandom rng = ThreadLocalRandom.current();
-        for (int hour = 0; hour < 24; hour++) {
-            for (int i = 0; i < 12; i++) {
-                Instant ts = day.atTime(hour, Math.min(59, i * 4)).toInstant(ZoneOffset.UTC);
-                boolean fail = hour == 14 ? rng.nextDouble() < 0.85 : rng.nextDouble() < 0.03;
-                if (fail) {
-                    pool.historyStore().record(ConnectionAttempt.failure(
-                            primary, ts, AttemptOutcome.TIMEOUT, FailureType.TIMEOUT, 80));
-                } else {
-                    pool.historyStore().record(ConnectionAttempt.success(primary, ts, 12));
-                }
-                pool.historyStore().record(ConnectionAttempt.success(backup, ts, 10));
-            }
-        }
-        // Historical burst that has already ended (success breaks the cluster).
-        Instant burst = day.atTime(14, 5).toInstant(ZoneOffset.UTC);
-        for (int i = 0; i < 4; i++) {
-            pool.historyStore().record(ConnectionAttempt.failure(
-                    primary,
-                    burst.plusSeconds(i),
-                    AttemptOutcome.FAILURE,
-                    FailureType.NETWORK_UNREACHABLE,
-                    40));
-        }
-        pool.historyStore().record(ConnectionAttempt.success(primary, burst.plusSeconds(10), 8));
-        // Fresh healthy samples near end of day so recent-rate isn't stuck high.
-        for (int i = 0; i < 15; i++) {
-            Instant ts = day.atTime(16, i * 2).toInstant(ZoneOffset.UTC);
-            pool.historyStore().record(ConnectionAttempt.success(primary, ts, 8));
-            pool.historyStore().record(ConnectionAttempt.success(backup, ts, 8));
-        }
+    /**
+     * Audit-reproduced targets from the pre-fix ExperimentRunner that
+     * directly seeded day patterns into FailureHistoryStore (not an honest
+     * learn-then-measure run). Kept for before/after comparison only.
+     */
+    static void writeBeforeFixesBaseline(Path path) throws IOException {
+        String csv = """
+                # AUDIT BASELINE (expected-before) — reproduced targets from the pre-fix
+                # ExperimentRunner that seeded history with patterned answers, then measured.
+                # NOT produced by the honest 7-day learning protocol in this class.
+                mode,scenario,requests,success_rate,connect_failures,preemptive_failovers,warm_hits,backup_selections,notes
+                reactive,afternoon-bad-window,100,0.9900,83,0,0,81,paper-curated audit target (83→3 claim)
+                predictive,afternoon-bad-window,100,1.0000,3,97,8,100,paper-curated audit target (83→3 claim)
+                reactive,morning-healthy,100,1.0000,19,0,0,19,seeded-history demo run
+                predictive,morning-healthy,100,1.0000,9,57,0,65,seeded-history demo run
+                reactive,evening-stable,80,1.0000,10,0,0,10,seeded-history demo run
+                predictive,evening-stable,80,1.0000,6,6,0,12,seeded-history demo run
+                """;
+        Files.writeString(path, csv, StandardCharsets.UTF_8);
+        System.out.println("Wrote " + path.toAbsolutePath());
     }
 
-    private static void writeCsv(Path path, List<ResultRow> rows) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        sb.append("mode,scenario,requests,success_rate,avg_latency_ms,preemptive_failovers,warm_hits,checkout_failures,connect_failures,backup_selections\n");
+    static List<SummaryRow> summarize(List<ResultRow> rows) {
+        Map<String, List<ResultRow>> groups = new LinkedHashMap<>();
         for (ResultRow r : rows) {
-            sb.append(r.mode()).append(',')
+            String key = r.mode() + "|" + r.scenario();
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(r);
+        }
+        List<SummaryRow> out = new ArrayList<>();
+        for (var e : groups.entrySet()) {
+            List<ResultRow> g = e.getValue();
+            String[] parts = e.getKey().split("\\|", 2);
+            out.add(new SummaryRow(
+                    parts[0],
+                    parts[1],
+                    g.size(),
+                    mean(g, r -> r.connectFailures()),
+                    sd(g, r -> r.connectFailures()),
+                    mean(g, r -> r.successRate()),
+                    sd(g, r -> r.successRate()),
+                    mean(g, r -> r.backupSelections()),
+                    sd(g, r -> r.backupSelections()),
+                    mean(g, r -> r.preemptiveFailovers()),
+                    sd(g, r -> r.preemptiveFailovers()),
+                    mean(g, r -> r.warmHits()),
+                    sd(g, r -> r.warmHits()),
+                    mean(g, r -> r.meanCheckoutLatencySimMs()),
+                    sd(g, r -> r.meanCheckoutLatencySimMs())));
+        }
+        return out;
+    }
+
+    private interface ToDouble {
+        double apply(ResultRow r);
+    }
+
+    private static double mean(List<ResultRow> rows, ToDouble f) {
+        double sum = 0;
+        for (ResultRow r : rows) {
+            sum += f.apply(r);
+        }
+        return rows.isEmpty() ? 0 : sum / rows.size();
+    }
+
+    private static double sd(List<ResultRow> rows, ToDouble f) {
+        if (rows.size() < 2) {
+            return 0;
+        }
+        double m = mean(rows, f);
+        double acc = 0;
+        for (ResultRow r : rows) {
+            double d = f.apply(r) - m;
+            acc += d * d;
+        }
+        return Math.sqrt(acc / (rows.size() - 1));
+    }
+
+    private static void writeRunsCsv(Path path, List<ResultRow> rows) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("seed,mode,scenario,requests,success_rate,connect_failures,backup_selections,")
+                .append("preemptive_failovers,warm_hits,mean_checkout_latency_sim_ms\n");
+        for (ResultRow r : rows) {
+            sb.append(r.seed()).append(',')
+                    .append(r.mode()).append(',')
                     .append(r.scenario()).append(',')
                     .append(r.requests()).append(',')
                     .append(String.format(Locale.US, "%.4f", r.successRate())).append(',')
-                    .append(String.format(Locale.US, "%.3f", r.avgLatencyMs())).append(',')
+                    .append(r.connectFailures()).append(',')
+                    .append(r.backupSelections()).append(',')
                     .append(r.preemptiveFailovers()).append(',')
                     .append(r.warmHits()).append(',')
-                    .append(r.checkoutFailures()).append(',')
-                    .append(r.connectFailures()).append(',')
-                    .append(r.backupSelections()).append('\n');
+                    .append(String.format(Locale.US, "%.3f", r.meanCheckoutLatencySimMs())).append('\n');
         }
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
         System.out.println("Wrote " + path.toAbsolutePath());
     }
 
-    private static void writeMarkdown(Path path, List<ResultRow> rows) throws IOException {
+    private static void writeSummaryCsv(Path path, List<SummaryRow> rows) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("# Experiment Results\n\n");
-        sb.append("| Mode | Scenario | Req | Success | Connect Failures | Preemptive Failovers | Warm Hits | Backup Selections |\n");
-        sb.append("|---|---|---:|---:|---:|---:|---:|---:|\n");
-        for (ResultRow r : rows) {
+        sb.append("mode,scenario,n,")
+                .append("mean_connect_failures,sd_connect_failures,")
+                .append("mean_success_rate,sd_success_rate,")
+                .append("mean_backup_selections,sd_backup_selections,")
+                .append("mean_preemptive_failovers,sd_preemptive_failovers,")
+                .append("mean_warm_hits,sd_warm_hits,")
+                .append("mean_latency_sim_ms,sd_latency_sim_ms\n");
+        for (SummaryRow r : rows) {
+            sb.append(r.mode()).append(',')
+                    .append(r.scenario()).append(',')
+                    .append(r.n()).append(',')
+                    .append(fmt(r.meanConnectFailures())).append(',')
+                    .append(fmt(r.sdConnectFailures())).append(',')
+                    .append(fmt(r.meanSuccessRate())).append(',')
+                    .append(fmt(r.sdSuccessRate())).append(',')
+                    .append(fmt(r.meanBackupSelections())).append(',')
+                    .append(fmt(r.sdBackupSelections())).append(',')
+                    .append(fmt(r.meanPreemptiveFailovers())).append(',')
+                    .append(fmt(r.sdPreemptiveFailovers())).append(',')
+                    .append(fmt(r.meanWarmHits())).append(',')
+                    .append(fmt(r.sdWarmHits())).append(',')
+                    .append(fmt(r.meanLatencySimMs())).append(',')
+                    .append(fmt(r.sdLatencySimMs())).append('\n');
+        }
+        Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
+        System.out.println("Wrote " + path.toAbsolutePath());
+    }
+
+    private static void writeSummaryMd(
+            Path path, List<SummaryRow> rows, int seeds, double elapsedSec) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Experiment Summary (honest protocol)\n\n");
+        sb.append("- Seeds: **").append(seeds).append("** (Random seeds 1..").append(seeds).append(")\n");
+        sb.append("- Learning: ").append(LEARNING_DAYS)
+                .append(" days × 24h × ").append(REQUESTS_PER_HOUR)
+                .append(" req/h via live FlakyEndpointConnector (no answer-seeding)\n");
+        sb.append("- Measurement: day 8 windows; `reuseEnabled=false`; latency = simulated ms (no sleep)\n");
+        sb.append("- Modes: reactive, circuit_breaker (open after 3 primary fails / 60s / half-open probe), predictive\n");
+        sb.append(String.format(Locale.US, "- Wall time: %.1fs%n%n", elapsedSec));
+        sb.append("| Mode | Scenario | n | Connect Failures (mean±sd) | Success Rate | Preemptive Failovers | Warm Hits | Backup Sel | Latency sim ms |\n");
+        sb.append("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        for (SummaryRow r : rows) {
             sb.append("| ").append(r.mode())
                     .append(" | ").append(r.scenario())
-                    .append(" | ").append(r.requests())
-                    .append(" | ").append(String.format(Locale.US, "%.1f%%", r.successRate() * 100))
-                    .append(" | ").append(r.connectFailures())
-                    .append(" | ").append(r.preemptiveFailovers())
-                    .append(" | ").append(r.warmHits())
-                    .append(" | ").append(r.backupSelections())
+                    .append(" | ").append(r.n())
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanConnectFailures(), r.sdConnectFailures()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f%%±%.1f", r.meanSuccessRate() * 100, r.sdSuccessRate() * 100))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanPreemptiveFailovers(), r.sdPreemptiveFailovers()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanWarmHits(), r.sdWarmHits()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanBackupSelections(), r.sdBackupSelections()))
+                    .append(" | ").append(String.format(Locale.US, "%.0f±%.0f", r.meanLatencySimMs(), r.sdLatencySimMs()))
                     .append(" |\n");
         }
-        sb.append("\n**Reading the table:** lower *Connect Failures* and higher *Preemptive Failovers*/*Warm Hits* ")
-                .append("in the afternoon window show predictive avoidance working. ")
-                .append("Reactive mode still completes many requests via post-failure failover, ")
-                .append("but pays primary connect failures first.\n");
+        sb.append("\nCompare to `before_fixes.csv` (audit seeded-history targets). ")
+                .append("Numbers here are measured — not curated.\n");
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
         System.out.println("Wrote " + path.toAbsolutePath());
     }
 
-    private static void printSummary(List<ResultRow> rows) {
-        System.out.println("\n=== Experiment Summary ===");
-        for (ResultRow r : rows) {
-            System.out.printf(
-                    "%-11s %-22s success=%.1f%% connectFail=%d failover=%d warm=%d backupSel=%d%n",
+    private static String fmt(double v) {
+        return String.format(Locale.US, "%.4f", v);
+    }
+
+    private static void printSummary(List<SummaryRow> rows) {
+        System.out.println("\n=== Honest Experiment Summary ===");
+        for (SummaryRow r : rows) {
+            System.out.printf(Locale.US,
+                    "%-16s %-16s fail=%.1f±%.1f success=%.1f%% failover=%.1f warm=%.1f%n",
                     r.mode(),
                     r.scenario(),
-                    r.successRate() * 100,
-                    r.connectFailures(),
-                    r.preemptiveFailovers(),
-                    r.warmHits(),
-                    r.backupSelections());
+                    r.meanConnectFailures(),
+                    r.sdConnectFailures(),
+                    r.meanSuccessRate() * 100,
+                    r.meanPreemptiveFailovers(),
+                    r.meanWarmHits());
         }
     }
 }

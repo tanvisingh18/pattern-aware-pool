@@ -12,6 +12,7 @@ import java.util.Objects;
 public final class EndpointRiskProfile {
     private final EndpointId endpointId;
     private final double[] hourlyFailureRates;
+    private final double[] hourlyPlainFailureRates;
     private final int[] hourlySampleCounts;
     private final double recentFailureRate;
     private final ClusterState clusterState;
@@ -21,6 +22,7 @@ public final class EndpointRiskProfile {
     public EndpointRiskProfile(
             EndpointId endpointId,
             double[] hourlyFailureRates,
+            double[] hourlyPlainFailureRates,
             int[] hourlySampleCounts,
             double recentFailureRate,
             ClusterState clusterState,
@@ -28,16 +30,39 @@ public final class EndpointRiskProfile {
             long sampleCount) {
         this.endpointId = Objects.requireNonNull(endpointId, "endpointId");
         Objects.requireNonNull(hourlyFailureRates, "hourlyFailureRates");
+        Objects.requireNonNull(hourlyPlainFailureRates, "hourlyPlainFailureRates");
         Objects.requireNonNull(hourlySampleCounts, "hourlySampleCounts");
-        if (hourlyFailureRates.length != 24 || hourlySampleCounts.length != 24) {
+        if (hourlyFailureRates.length != 24
+                || hourlyPlainFailureRates.length != 24
+                || hourlySampleCounts.length != 24) {
             throw new IllegalArgumentException("hourly arrays must have length 24");
         }
         this.hourlyFailureRates = Arrays.copyOf(hourlyFailureRates, 24);
+        this.hourlyPlainFailureRates = Arrays.copyOf(hourlyPlainFailureRates, 24);
         this.hourlySampleCounts = Arrays.copyOf(hourlySampleCounts, 24);
         this.recentFailureRate = clamp01(recentFailureRate);
         this.clusterState = Objects.requireNonNull(clusterState, "clusterState");
         this.computedAt = Objects.requireNonNull(computedAt, "computedAt");
         this.sampleCount = sampleCount;
+    }
+
+    public EndpointRiskProfile(
+            EndpointId endpointId,
+            double[] hourlyFailureRates,
+            int[] hourlySampleCounts,
+            double recentFailureRate,
+            ClusterState clusterState,
+            Instant computedAt,
+            long sampleCount) {
+        this(
+                endpointId,
+                hourlyFailureRates,
+                hourlyFailureRates,
+                hourlySampleCounts,
+                recentFailureRate,
+                clusterState,
+                computedAt,
+                sampleCount);
     }
 
     /** Backward-compatible constructor (zeros for sample counts). */
@@ -60,17 +85,24 @@ public final class EndpointRiskProfile {
         return hourlyFailureRates[hour];
     }
 
+    /** Empirical failures/samples — used for hot-hour gating (stable vs EWMA spikes). */
+    public double plainFailureRateAtHour(int hour) {
+        checkHour(hour);
+        return hourlyPlainFailureRates[hour];
+    }
+
     public int samplesAtHour(int hour) {
         checkHour(hour);
         return hourlySampleCounts[hour];
     }
 
     /**
-     * Hot-hour signal: enough samples and elevated failure rate.
-     * Allows time-of-day alone to drive preemptive failover.
+     * Hot-hour signal: enough samples and elevated plain failure rate.
+     * Uses the empirical rate so a short EWMA spike cannot permanently
+     * mark an hour as hot after traffic has already shifted away.
      */
     public boolean isHotHour(int hour, int minSamples, double minRate) {
-        return samplesAtHour(hour) >= minSamples && failureRateAtHour(hour) >= minRate;
+        return samplesAtHour(hour) >= minSamples && plainFailureRateAtHour(hour) >= minRate;
     }
 
     public double[] hourlyFailureRates() {
@@ -111,11 +143,11 @@ public final class EndpointRiskProfile {
     public String toString() {
         StringBuilder hours = new StringBuilder();
         for (int h = 0; h < 24; h++) {
-            if (hourlySampleCounts[h] > 0 && hourlyFailureRates[h] > 0.05) {
+            if (hourlySampleCounts[h] > 0 && hourlyPlainFailureRates[h] > 0.05) {
                 if (hours.length() > 0) {
                     hours.append(", ");
                 }
-                hours.append(String.format("%02d:00=%.0f%%(n=%d)", h, hourlyFailureRates[h] * 100, hourlySampleCounts[h]));
+                hours.append(String.format("%02d:00=%.0f%%(n=%d)", h, hourlyPlainFailureRates[h] * 100, hourlySampleCounts[h]));
             }
         }
         if (hours.length() == 0) {

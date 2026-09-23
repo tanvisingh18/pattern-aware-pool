@@ -187,6 +187,9 @@ public final class ConnectionPool implements AutoCloseable {
         }
 
         RoutingDecision decision = routingDecider.decide(requested, at);
+        if (decision.trigger() == RoutingDecision.Trigger.RESET_PREDICTED) {
+            resetDetector.consumePrediction(requested);
+        }
         EndpointId selected = decision.selected();
 
         // Prefer warm connection when failing over to backup.

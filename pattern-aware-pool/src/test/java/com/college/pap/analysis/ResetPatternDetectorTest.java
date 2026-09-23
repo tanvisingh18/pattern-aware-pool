@@ -39,6 +39,8 @@ class ResetPatternDetectorTest {
             detector.observe(primary, true);
         }
         assertTrue(detector.preferBackup(primary));
+        detector.consumePrediction(primary);
+        assertTrue(!detector.preferBackup(primary), "prediction is one-shot until next reset cycle");
     }
 
     @Test
