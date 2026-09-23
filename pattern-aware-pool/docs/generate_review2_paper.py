@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Generate Review-2 complete research paper DOCX from project content + experiment results."""
+"""Generate Review-2 complete research paper DOCX from experiment_summary.csv (no hardcoded 83→3)."""
 
+from __future__ import annotations
+
+import csv
 from pathlib import Path
+
 from docx import Document
-from docx.shared import Pt, Inches, RGBColor
+from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
 
-ROOT = Path("/Users/tanvi/Downloads/java proj")
+ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = ROOT / "Java Submission"
 OUT_DIR.mkdir(exist_ok=True)
 OUT = OUT_DIR / "Review2_Complete_Research_Paper.docx"
 MD_OUT = OUT_DIR / "Review2_Complete_Research_Paper.md"
-RESULTS = ROOT / "pattern-aware-pool" / "docs" / "results" / "experiment_results.csv"
+SUMMARY = ROOT / "pattern-aware-pool" / "docs" / "results" / "experiment_summary.csv"
+BEFORE = ROOT / "pattern-aware-pool" / "docs" / "results" / "before_fixes.csv"
 
 
 def set_run_font(run, size=11, bold=False, italic=False):
@@ -62,19 +66,53 @@ def add_table(doc, headers, rows):
     return table
 
 
-def parse_results():
-    if not RESULTS.exists():
-        return []
-    lines = RESULTS.read_text(encoding="utf-8").strip().splitlines()
+def load_summary():
+    if not SUMMARY.exists():
+        raise SystemExit(f"missing {SUMMARY}")
     rows = []
-    for line in lines[1:]:
-        parts = line.split(",")
-        if len(parts) >= 10:
-            rows.append(parts)
+    with SUMMARY.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
     return rows
 
 
+def find_row(rows, mode, scenario):
+    for r in rows:
+        if r["mode"] == mode and r["scenario"] == scenario:
+            return r
+    raise KeyError(f"{mode}/{scenario}")
+
+
+def fmt_mean_sd(mean_s, sd_s, digits=1):
+    mean = float(mean_s)
+    sd = float(sd_s)
+    return f"{mean:.{digits}f}±{sd:.{digits}f}"
+
+
+def pct(mean_s, sd_s):
+    return f"{float(mean_s) * 100:.1f}%±{float(sd_s) * 100:.1f}"
+
+
 def build():
+    summary = load_summary()
+    bad_r = find_row(summary, "reactive", "bad-window")
+    bad_c = find_row(summary, "circuit_breaker", "bad-window")
+    bad_p = find_row(summary, "predictive", "bad-window")
+    morn_r = find_row(summary, "reactive", "morning-healthy")
+    morn_c = find_row(summary, "circuit_breaker", "morning-healthy")
+    morn_p = find_row(summary, "predictive", "morning-healthy")
+    eve_r = find_row(summary, "reactive", "evening-stable")
+    eve_c = find_row(summary, "circuit_breaker", "evening-stable")
+    eve_p = find_row(summary, "predictive", "evening-stable")
+
+    n = int(float(bad_r["n"]))
+    react_fail = fmt_mean_sd(bad_r["mean_connect_failures"], bad_r["sd_connect_failures"])
+    cb_fail = fmt_mean_sd(bad_c["mean_connect_failures"], bad_c["sd_connect_failures"])
+    pred_fail = fmt_mean_sd(bad_p["mean_connect_failures"], bad_p["sd_connect_failures"])
+    pred_fo = fmt_mean_sd(bad_p["mean_preemptive_failovers"], bad_p["sd_preemptive_failovers"])
+    pred_warm = fmt_mean_sd(bad_p["mean_warm_hits"], bad_p["sd_warm_hits"])
+
     doc = Document()
     section = doc.sections[0]
     section.top_margin = Inches(1)
@@ -82,7 +120,6 @@ def build():
     section.left_margin = Inches(1)
     section.right_margin = Inches(1)
 
-    # Title block
     add_para(
         doc,
         "History-Aware Predictive Connection Pooling: A Client-Side Learning Approach "
@@ -112,454 +149,286 @@ def build():
     add_heading(doc, "Abstract", 1)
     add_para(
         doc,
-        "Standard JDBC connection pools — HikariCP, Apache DBCP2, c3p0 — and resilience wrappers such as "
-        "Hystrix and Resilience4j circuit breakers are memoryless: a connection failure is detected, the "
-        "connection is discarded, and a replacement is created, but nothing about the failure is retained "
-        "once handled. In edge and field deployments — satellite uplinks, cellular backhaul, VPN tunnels — "
-        "failures are frequently structured and recurring rather than independent and random, so a pool with "
-        "no failure memory pays the full cost of the first failure in every recurrence of a pattern it has "
-        "already seen. This paper positions a client-side JDBC connection pool that learns per-endpoint "
-        "failure patterns from its own attempt history using exponential weighted moving average (EWMA) "
-        "smoothing and run-length burst detection, then pre-emptively reroutes traffic and pre-warms backup "
-        "connections. We present the three-layer methodology, a complete Advanced Java implementation, "
-        "controlled experiments against a reactive baseline, and results showing that during a simulated "
-        "daily bad window the predictive pool reduces underlying connect failures from 83 to 3 per 100 "
-        "requests while serving warm backup connections. The identified research gap — lack of "
-        "infrastructure-agnostic, history-aware predictive pooling at the JDBC client — is thereby addressed "
-        "with a feasible, syllabus-aligned prototype.",
+        "Standard JDBC connection pools and resilience wrappers such as circuit breakers are largely "
+        "memoryless across recurring structural failure patterns. This paper presents a client-side "
+        "pattern-aware pool that learns per-endpoint history (EWMA hourly rates, run-length clusters, "
+        "and optional reset periods), then fails over when weighted risk, hot-hour plain rate, live "
+        "cluster length, or a predicted reset threshold fires — and pre-warms backup connections with "
+        "recovery probes. We compare three modes under an honest protocol (7-day live learning, day-8 "
+        f"measurement, n={n} seeds): reactive primary-first, a classic circuit breaker (open after 3 "
+        "primary failures / 60s / half-open probe), and the predictive pool. In the afternoon bad window, "
+        f"reactive incurred {react_fail} connect failures per 100 requests, circuit breaker {cb_fail}, "
+        f"and predictive {pred_fail} with {pred_fo} preemptive failovers and {pred_warm} warm hits "
+        "(numbers read from experiment_summary.csv). UI is Swing (not JavaFX); lifecycle hooks are "
+        "Spring-compatible in spirit, not a Spring dependency.",
     )
-
     add_para(
         doc,
         "Keywords— connection pooling; JDBC; self-healing systems; predictive fault tolerance; "
-        "proactive resilience; EWMA; failure prediction; circuit breaker; edge computing; preemptive migration.",
+        "EWMA; circuit breaker; hot-hour failover; recovery probe; preemptive migration.",
         italic=True,
     )
 
-    # I Introduction (condensed from existing)
     add_heading(doc, "I. INTRODUCTION", 1)
     add_para(
         doc,
-        "Connection pools amortise the cost of establishing database or API connections across many requests. "
-        "Mainstream implementations follow a memoryless failure loop: validate/use, evict on failure, create "
-        "replacement on the next request. This is reasonable for data-centre networking with near-independent "
-        "failures, but a poor fit for edge and field deployments where connectivity degrades in structured, "
-        "repeatable ways: time-of-day degradation (e.g., solar interference on a satellite link between "
-        "14:00–15:00), burst clustering (failures in runs of three to five), and threshold-triggered resets "
-        "(VPN tunnels that drop after a bounded number of successful uses).",
+        "Connection pools amortise JDBC handshake cost, but mainstream pools follow a memoryless failure "
+        "loop: validate/use, evict on failure, create replacement. That fits near-independent data-centre "
+        "failures poorly when connectivity degrades in structured ways — daily bad hours, burst clusters, "
+        "and threshold-triggered resets after a bounded success streak.",
     )
     add_para(
         doc,
-        "Over 2024–2026, fault-tolerance literature has shifted from reactive detection toward predictive, "
-        "pre-emptive management. This shift is visible from mobile edge orchestration [1] to 6G network "
-        "slicing [3], satellite connectivity [5][6], IoT resource allocation [7], and cloud infrastructure "
-        "health management [8][11]. However, those systems generally require infrastructure telemetry or "
-        "orchestrator access unavailable to a client-side JDBC pool. This work implements and evaluates a "
-        "lightweight, infrastructure-agnostic counterpart that learns only from the pool’s own attempt history.",
+        "Circuit breakers reduce repeated primary attempts after a short failure window, but still pay "
+        "the first failures of every open period and do not pre-warm backups. This work evaluates whether "
+        "client-side history can do better than both reactive failover and a circuit breaker on the same "
+        "flaky-endpoint simulator.",
     )
 
     add_heading(doc, "II. OBJECTIVES", 1)
     for t in [
-        "O1 — Failure memory: record every connection attempt per endpoint (timestamp, outcome, failure type, duration) in a bounded, thread-safe in-memory store.",
-        "O2 — Pattern learning: derive hourly EWMA failure-rate profiles and run-length cluster/burst state per endpoint.",
-        "O3 — Predictive routing: compute a weighted risk score and route new requests to the lowest-risk endpoint before failure.",
-        "O4 — Pre-emptive readiness: pre-warm and validate backup connections ahead of predicted high-risk windows.",
+        "O1 — Failure memory: record attempts per endpoint in a bounded store.",
+        "O2 — Pattern learning: hourly rates (EWMA + plain), clusters, optional reset period detection.",
+        "O3 — Predictive routing: failover on weighted score OR hot hour OR live cluster OR reset prediction.",
+        "O4 — Pre-emptive readiness: pre-warm backups and recover primary via background probes.",
+        "O5 — Honest evaluation: learn from live traffic for 7 days; measure day 8; report mean±sd over seeds.",
     ]:
         add_para(doc, t)
 
     add_heading(doc, "III. LITERATURE REVIEW (SUMMARY)", 1)
     add_para(
         doc,
-        "Reactive patterns (circuit breaker, retry/backoff, bulkhead) contain cascading failure after thresholds "
-        "are crossed but cannot act before the first failures of a known pattern [2][14]. Predictive systems such "
-        "as PreGAN+ [1], Deoxys [8], GQAT-Net [4], FT-MoE [9], 6G resilient slicing [3], IoT prediction-based "
-        "allocation [7], and satellite link predictors [5][6] demonstrate predict-then-act behaviour, but operate "
-        "above the application JDBC layer with infrastructure-level signals. Adjacent pool work focuses on "
-        "capacity sizing rather than per-attempt endpoint routing [15]. Full detailed review text from Review-1 "
-        "is retained in the project archive; this Review-2 document focuses on methodology through conclusion.",
+        "Reactive patterns (circuit breaker, retry/backoff) contain cascading failure after thresholds "
+        "are crossed but cannot act before the first failures of a known pattern [2][14]. Predictive "
+        "systems such as PreGAN+ [1], Deoxys [8], and related edge/satellite predictors [5][6] demonstrate "
+        "predict-then-act behaviour with infrastructure telemetry a JDBC client typically lacks. Review-1 "
+        "surveyed a broader set (21 papers); this Review-2 document cites the subset needed for methodology "
+        "through conclusion and does not alter Review-1 artefacts.",
     )
 
     add_heading(doc, "IV. RESEARCH GAP", 1)
     add_para(
         doc,
-        "No widely used connection pool combined with a standard resilience wrapper retains per-endpoint failure "
-        "history across time in a form that enables distinguishing a structurally unreliable time window from a "
-        "random failure, then acting before the next occurrence. Predictive systems [1]–[12] require telemetry "
-        "or control planes a JDBC client does not have. Gap (one sentence): an application-level JDBC connection "
-        "pool that treats its own failure history as a first-class learned signal for pre-emptive per-request "
-        "routing and pre-warming, without external telemetry, orchestrator access, or co-simulation infrastructure.",
+        "Gap: an application-level JDBC pool that treats its own failure history as a first-class signal "
+        "for pre-emptive per-request routing and pre-warming, without external telemetry — evaluated "
+        "honestly against both reactive failover and a circuit-breaker baseline.",
     )
 
-    # ========== NEW REVIEW-2 SECTIONS ==========
     add_heading(doc, "3. PROPOSED METHODOLOGY / PROPOSED SYSTEM", 1)
-
     add_heading(doc, "3.1 Overall Methodology", 2)
     add_para(
         doc,
-        "The system is developed as a layered, incremental methodology so each layer is independently "
-        "demonstrable. Development proceeds as: (1) domain modelling of attempts and risk profiles; "
-        "(2) Layer 1 history + pattern analysis; (3) Layer 2 risk scoring + routing; (4) Layer 3 scheduled "
-        "pre-warming; (5) ConnectionPool orchestration with simulated flaky endpoints; (6) comparative "
-        "experiments against a reactive baseline; (7) Advanced Java integrations (ThreadGroup monitoring "
-        "workers, lifecycle hooks analogous to Spring @PostConstruct/@PreDestroy, RMI management interface, "
-        "Swing/JavaFX-style live dashboard). Evaluation uses a deterministic/stochastic flaky-endpoint "
-        "simulator that reproduces time-of-day spikes, burst clusters, and threshold resets without requiring "
-        "real satellite or cellular hardware.",
+        "Layered development: domain models → Layer 1 history/analysis → Layer 2 scoring/routing → "
+        "Layer 3 pre-warm/recovery → ConnectionPool orchestration (predictive / reactive / circuit-breaker) → "
+        "honest ExperimentRunner → Advanced Java integrations (named ThreadGroup workers, Spring-compatible "
+        "lifecycle class, RMI management, Swing monitoring dashboard).",
     )
 
-    add_heading(doc, "3.2 System Architecture / Block Diagram", 2)
-    add_para(
-        doc,
-        "Architecture (textual block diagram):",
-        bold=True,
-    )
+    add_heading(doc, "3.2 System Architecture", 2)
     add_para(
         doc,
         "Application → ConnectionPool.getConnection()\n"
-        "    ├─ RoutingDecider (Layer 2) ← PredictionEngine ← EndpointRiskProfile\n"
-        "    │       ↑                         ↑\n"
-        "    │   PatternAnalyzer (Layer 1) ← FailureHistoryStore\n"
-        "    ├─ WarmPool / BackupPreWarmer (Layer 3)\n"
-        "    ├─ EndpointConnector (primary / backup; flaky simulator or JDBC)\n"
-        "    ├─ PoolMetrics + MonitoringDashboard\n"
-        "    └─ PoolLifecycle / RMI PoolManagementRemote\n"
-        "Background: ScheduledExecutorService inside ThreadGroup \"pap-monitoring\"",
-        size=10,
-    )
-    add_para(
-        doc,
-        "Figure 1 (conceptual): Request path scores all registered endpoints, optionally consumes a "
-        "pre-warmed backup connection, records the attempt outcome into FailureHistoryStore, and periodically "
-        "recomputes risk profiles while BackupPreWarmer prepares capacity before predicted bad windows.",
-        italic=True,
-    )
-
-    add_heading(doc, "3.3 Detailed Explanation of the Proposed Approach", 2)
-    add_para(
-        doc,
-        "Layer 1 — Failure Pattern Learning (Memory). Every attempt is stored as ConnectionAttempt "
-        "(timestamp, endpoint, SUCCESS/FAILURE/TIMEOUT, FailureType, durationMs) in a bounded "
-        "ConcurrentLinkedDeque per endpoint (FailureHistoryStore). PatternAnalyzer computes: "
-        "(a) 24 hourly EWMA failure rates; (b) recent failure rate over a sliding window; "
-        "(c) ClusterState via run-length encoding of consecutive failures.",
-    )
-    add_para(
-        doc,
-        "Layer 2 — Predictive Rerouting (Intelligence). PredictionEngine computes "
-        "risk = α·time_of_day_failure_rate + β·cluster_penalty + γ·recent_failure_rate "
-        "(default α=0.45, β=0.35, γ=0.20). RoutingDecider selects the requested endpoint if risk < threshold "
-        "(default 0.55); otherwise performs PREEMPTIVE_FAILOVER to the healthiest backup, or DEGRADED_MODE "
-        "if all endpoints are high-risk.",
-    )
-    add_para(
-        doc,
-        "Layer 3 — Pre-warming (Proactive Action). BackupPreWarmer, on a schedule, checks whether the "
-        "primary is high-risk now or within leadMinutes (including upcoming hour buckets with elevated "
-        "historical failure rate ≥ 0.50). If so, it creates and validates backup PapConnections and parks "
-        "them in WarmPool. At failover time, getConnection() prefers warm connections, eliminating cold "
-        "handshake cost.",
-    )
-
-    add_heading(doc, "3.4 Algorithms / Techniques / Models Used", 2)
-    add_para(doc, "Algorithm 1 — EWMA hourly failure-rate update", bold=True)
-    add_para(
-        doc,
-        "For each attempt in chronological order for hour h:\n"
-        "  observation ← 1 if failure else 0\n"
-        "  if first sample for h: rate[h] ← observation\n"
-        "  else: rate[h] ← α_ewma·observation + (1−α_ewma)·rate[h]\n"
-        "Default α_ewma = 0.35.",
-        size=10,
-    )
-    add_para(doc, "Algorithm 2 — Failure cluster / run-length detection", bold=True)
-    add_para(
-        doc,
-        "Scan attempts: increment run on failure; on success, finalize run into averageFailureRunLength.\n"
-        "inFailureCluster ← (currentRunLength ≥ clusterThreshold)  # default 2\n"
-        "clusterPenalty ← min(1, 0.7·min(1, run/5) + 0.3·min(1, avgRun/5))",
-        size=10,
-    )
-    add_para(doc, "Algorithm 3 — Risk scoring and routing", bold=True)
-    add_para(
-        doc,
-        "risk(e,t) ← α·tod(e,hour(t)) + β·clusterPenalty(e) + γ·recent(e)\n"
-        "if risk(requested) < θ: return requested\n"
-        "else if exists healthy backup: return argmin risk(backup)\n"
-        "else: return least-bad endpoint (degraded mode)",
-        size=10,
-    )
-    add_para(doc, "Algorithm 4 — Pre-warm decision", bold=True)
-    add_para(
-        doc,
-        "every period seconds:\n"
-        "  if risk(primary, now)≥θ OR tod(primary,hour)≥0.50 OR same within leadMinutes:\n"
-        "      while warmPool.size < target: create/validate backup connection; park",
+        "    ├─ RoutingDecider ← PredictionEngine ← EndpointRiskProfile\n"
+        "    │       ↑                    ↑\n"
+        "    │   PatternAnalyzer + ResetPatternDetector ← FailureHistoryStore\n"
+        "    ├─ WarmPool / BackupPreWarmer (pre-warm + recovery probes)\n"
+        "    ├─ IdleConnectionPool (real reuse; experiments disable reuse for routing purity)\n"
+        "    ├─ EndpointConnector (Flaky simulator or JdbcEndpointConnector)\n"
+        "    └─ PoolMetrics + MonitoringDashboard (Swing) + PoolLifecycle / RMI\n"
+        "Background: ScheduledExecutorService in ThreadGroup \"pap-monitoring\"",
         size=10,
     )
 
-    add_heading(doc, "3.5 Workflow / Process of the Proposed System", 2)
-    for step in [
-        "1. Application calls ConnectionPool.getConnection().",
-        "2. PatternAnalyzer refreshes profiles from FailureHistoryStore.",
-        "3. PredictionEngine scores primary and backups at current clock time.",
-        "4. RoutingDecider chooses endpoint (PRIMARY_OK / PREEMPTIVE_FAILOVER / DEGRADED_MODE).",
-        "5. If a warm backup connection exists for the chosen endpoint, return it (warm hit).",
-        "6. Otherwise EndpointConnector.connect() creates a live connection (simulated or JDBC).",
-        "7. Outcome is recorded; metrics updated; connection returned to caller.",
-        "8. Background workers continuously re-analyze and pre-warm before predicted windows.",
-        "9. Lifecycle destroy / @PreDestroy drains warm pool and shuts down executors; RMI can retune weights live.",
-    ]:
-        add_para(doc, step, space_after=2)
+    add_heading(doc, "3.3 Detailed Approach", 2)
+    add_para(
+        doc,
+        "Routing avoids the requested endpoint when ANY of: (1) weighted risk ≥ threshold; "
+        "(2) hot hour — enough samples and plain failure rate ≥ hotHourThreshold; "
+        "(3) live cluster — currentRunLength ≥ clusterAvoidRun; "
+        "(4) reset predicted — success streak ≥ detected period P−1 (one-shot). "
+        "Attribution order: HOT_HOUR → LIVE_CLUSTER → RESET_PREDICTED → SCORE. "
+        "BackupPreWarmer pre-warms when risk/hot-hour is imminent and probes primary while avoided "
+        "or while a live cluster is sticky so traffic can return. IdleConnectionPool provides real "
+        "pooling; PapConnection.close() returns handles when reuse is enabled.",
+    )
+
+    add_heading(doc, "3.4 Algorithms", 2)
+    add_para(
+        doc,
+        "EWMA hourly update (α=0.35 after warm-up); plain rate = failures/samples for hot-hour gating; "
+        "run-length clustering; risk = α·tod + β·clusterPenalty + γ·recent; "
+        "reset period = median of last three completed success-streaks (≥10) if within ±2; "
+        "circuit breaker = open after 3 consecutive primary failures for 60s (MutableClock), then one half-open probe.",
+        size=10,
+    )
 
     add_heading(doc, "4. IMPLEMENTATION / EXPERIMENTAL SETUP", 1)
-
-    add_heading(doc, "4.1 Hardware and Software Requirements", 2)
+    add_heading(doc, "4.1 Requirements", 2)
     add_table(
         doc,
         ["Component", "Specification"],
         [
-            ["Hardware", "Standard laptop/PC (Apple Silicon / x86_64), ≥8 GB RAM"],
-            ["OS", "macOS / Windows / Linux"],
-            ["JDK", "Eclipse Temurin JDK 17+ (tested on JDK 25)"],
+            ["JDK", "17+ (tested on Temurin 25)"],
             ["Build", "Apache Maven 3.9.x"],
             ["Test", "JUnit 5"],
-            ["UI", "Swing monitoring dashboard (JavaFX-equivalent syllabus demo)"],
-            ["Remote mgmt", "Java RMI (PoolManagementRemote)"],
-            ["Concurrency", "ScheduledExecutorService + named ThreadGroup pap-monitoring"],
+            ["UI", "Swing monitoring dashboard (not JavaFX)"],
+            ["Lifecycle", "PoolLifecycle — Spring-compatible @PostConstruct/@PreDestroy style, not Spring"],
+            ["Remote", "Java RMI PoolManagementRemote"],
         ],
     )
 
-    add_heading(doc, "4.2 Dataset Details", 2)
+    add_heading(doc, "4.2 Experimental Protocol (Honest)", 2)
     add_para(
         doc,
-        "No external public dataset is required. The evaluation dataset is a generated attempt trace "
-        "produced by FlakyEndpointConnector and/or direct history seeding:\n"
-        "• Primary endpoint: baseline fail ≈3%; hour 14 fail ≈85%; burst size 4; optional reset after 47 successes.\n"
-        "• Backup endpoint: near-healthy (≈1% baseline).\n"
-        "• Learning seed: 12 samples/hour × 24 hours + historical burst with recovery successes.\n"
-        "• Measured workloads: 100 requests (morning/afternoon), 80 requests (evening) per mode.\n"
-        "This matches the motivating structured-failure scenarios while remaining fully reproducible.",
-    )
-
-    add_heading(doc, "4.3 Tools, Technologies, and Frameworks", 2)
-    add_para(
-        doc,
-        "Java 17+; Maven; JUnit 5; java.util.concurrent; JDBC-style pool API (PapConnection / EndpointConnector); "
-        "RMI; Swing dashboard; lifecycle class mirroring Spring @PostConstruct/@PreDestroy; MutableClock for "
-        "deterministic time travel in experiments.",
-    )
-
-    add_heading(doc, "4.4 Implementation Procedure", 2)
-    for t in [
-        "Step 1: Implement domain models and FailureHistoryStore (circular buffer).",
-        "Step 2: Implement PatternAnalyzer (EWMA + clustering) with unit tests.",
-        "Step 3: Implement PredictionEngine, RiskWeights, RoutingDecider.",
-        "Step 4: Implement WarmPool, ConnectionValidator, BackupPreWarmer.",
-        "Step 5: Implement ConnectionPool orchestrator (predictive + reactive baseline modes).",
-        "Step 6: Implement FlakyEndpointConnector simulator and ExperimentRunner.",
-        "Step 7: Add PoolMetrics, MonitoringDashboard, RMI management, PoolLifecycle.",
-        "Step 8: Run FullSystemDemo + ExperimentRunner; export CSV/Markdown results.",
-    ]:
-        add_para(doc, t, space_after=2)
-
-    add_heading(doc, "4.5 Experimental Setup", 2)
-    add_para(
-        doc,
-        "Two modes are compared under identical simulated network patterns and MutableClock times:\n"
-        "• Reactive baseline: always try primary first; failover to backup only after a connect failure.\n"
-        "• Predictive pool: learn from seeded history; score risk; pre-emptively select backup; pre-warm "
-        "before 14:00 when hour-14 failure rate is elevated.\n"
-        "Scenarios: morning-healthy (09:15), afternoon-bad-window (14:20), evening-stable (18:00).\n"
-        "Primary metrics: checkout success rate, underlying connectFailures, preemptiveFailovers, warmHits, "
-        "backupSelections. Metrics are reset after learning/pre-warm so measurement windows are clean.",
+        f"Seeds: Random 1..{n} (no ThreadLocalRandom). Learning: 7 days × 24h × 12 req/h through live "
+        "FlakyEndpointConnector while advancing MutableClock and calling backgroundTick every 30s simulated. "
+        "Day 8 measurement windows (chronological): morning-healthy 09:15 (100), bad-window 14:20 (100), "
+        "evening-stable 18:00 (80). PoolConfig.reuseEnabled=false for routing experiments. Latency is a "
+        "simulated metric (bad-hour fail ≈2000 ms); connectors do not Thread.sleep. History is NOT seeded "
+        "with day-8 answers. Metrics reset before each window. Results: experiment_runs.csv / "
+        "experiment_summary.csv (mean, sd, n).",
     )
 
     add_heading(doc, "5. RESULTS AND DISCUSSION", 1)
-
-    add_heading(doc, "5.1 Experimental / Preliminary Results", 2)
-    res = parse_results()
-    headers = [
-        "Mode",
-        "Scenario",
-        "Req",
-        "Success",
-        "Connect Failures",
-        "Preemptive Failovers",
-        "Warm Hits",
-        "Backup Selections",
-    ]
+    add_heading(doc, "5.1 Measured Results (from experiment_summary.csv)", 2)
+    add_para(
+        doc,
+        f"Table II. Mean±sd over n={n} seeds. Connect failures are underlying EndpointConnector failures.",
+        italic=True,
+    )
     table_rows = []
-    # Use curated stable numbers from last good run if CSV locale-broken
-    curated = [
-        ["reactive", "morning-healthy", "100", "100.0%", "19", "0", "0", "19"],
-        ["predictive", "morning-healthy", "100", "100.0%", "9", "57", "0", "65"],
-        ["reactive", "afternoon-bad-window", "100", "99.0%", "83", "0", "0", "81"],
-        ["predictive", "afternoon-bad-window", "100", "100.0%", "3", "97", "8", "100"],
-        ["reactive", "evening-stable", "80", "100.0%", "10", "0", "0", "10"],
-        ["predictive", "evening-stable", "80", "100.0%", "6", "6", "0", "12"],
-    ]
-    add_para(doc, "Table II. Comparative results — Reactive baseline vs Predictive pool.", italic=True)
-    add_table(doc, headers, curated)
-
-    add_heading(doc, "5.2 Figures / Screenshots (Demo Evidence)", 2)
-    add_para(
-        doc,
-        "FullSystemDemo observations (representative run):\n"
-        "• After 24h learning: primary hour-14 failure rate ≈100%; backup hour-14 ≈0%.\n"
-        "• At 13:50 pre-warm tick: Warm pool size = 5; preWarmEvents = 5.\n"
-        "• At 14:20 checkouts: risk(primary)≈0.78 → PREEMPTIVE_FAILOVER to backup; multiple warm hits.\n"
-        "• Monitoring ThreadGroup name: pap-monitoring.\n"
-        "Raw machine-readable outputs are stored under pattern-aware-pool/docs/results/ "
-        "(experiment_results.csv, experiment_results.md).",
-    )
-
-    add_heading(doc, "5.3 Performance Metrics", 2)
-    add_para(
-        doc,
-        "Key metrics used:\n"
-        "• Success rate — fraction of getConnection() calls that returned a usable connection.\n"
-        "• Connect failures — underlying EndpointConnector failures (captures reactive first-failure cost).\n"
-        "• Preemptive failovers — routing decisions that selected backup before trying a high-risk primary.\n"
-        "• Warm hits — checkouts served from pre-warmed connections.\n"
-        "• Backup selections — how often backup endpoint was used.",
-    )
-
-    add_heading(doc, "5.4 Comparison with Existing Methods", 2)
-    add_para(doc, "Table III. Qualitative comparison.", italic=True)
+    for mode, scenario, req in [
+        ("reactive", "morning-healthy", "100"),
+        ("circuit_breaker", "morning-healthy", "100"),
+        ("predictive", "morning-healthy", "100"),
+        ("reactive", "bad-window", "100"),
+        ("circuit_breaker", "bad-window", "100"),
+        ("predictive", "bad-window", "100"),
+        ("reactive", "evening-stable", "80"),
+        ("circuit_breaker", "evening-stable", "80"),
+        ("predictive", "evening-stable", "80"),
+    ]:
+        r = find_row(summary, mode, scenario)
+        table_rows.append([
+            mode,
+            scenario,
+            req,
+            pct(r["mean_success_rate"], r["sd_success_rate"]),
+            fmt_mean_sd(r["mean_connect_failures"], r["sd_connect_failures"]),
+            fmt_mean_sd(r["mean_preemptive_failovers"], r["sd_preemptive_failovers"]),
+            fmt_mean_sd(r["mean_warm_hits"], r["sd_warm_hits"]),
+            fmt_mean_sd(r["mean_backup_selections"], r["sd_backup_selections"]),
+        ])
     add_table(
         doc,
-        ["Approach", "Memory", "Acts before failure?", "Pre-warm?", "Infra telemetry?"],
-        [
-            ["HikariCP / DBCP2", "No", "No", "No", "No"],
-            ["Circuit breaker", "Short window only", "No (after N fails)", "No", "No"],
-            ["PreGAN+ / Deoxys-like", "Yes (infra)", "Yes", "Migration/mitigation", "Yes"],
-            ["This project", "Yes (client attempts)", "Yes", "Yes", "No"],
-        ],
-    )
-    add_para(
-        doc,
-        "Quantitatively, in the afternoon bad window, reactive mode incurred 83 connect failures / 100 requests "
-        "while still often succeeding via post-failure failover. Predictive mode incurred only 3 connect "
-        "failures, performed 97 preemptive failovers, and recorded 8 warm hits — evidence that prediction "
-        "avoids paying the primary failure tax that circuit-breaker-style reaction cannot eliminate.",
+        ["Mode", "Scenario", "Req", "Success", "Connect Failures", "Preemptive FO", "Warm Hits", "Backup Sel"],
+        table_rows,
     )
 
-    add_heading(doc, "5.5 Discussion", 2)
+    add_heading(doc, "5.2 Comparison with Audit Baseline", 2)
     add_para(
         doc,
-        "Results support the central claim: when failures are temporally structured, history-aware scoring "
-        "plus preemptive routing sharply reduces wasted primary connection attempts. Pre-warming further "
-        "shows proactive capacity movement before 14:00. Morning/evening rows show the system remains "
-        "available outside the bad window; some residual backup preference can appear when recent/cluster "
-        "signals remain elevated — an acknowledged tuning trade-off between aggressiveness and stickiness "
-        "to primary. Overall, the prototype validates feasibility for an Advanced Java final-year scope "
-        "without infrastructure dependencies.",
+        "before_fixes.csv records audit-reproduced targets from the pre-fix runner that seeded "
+        "patterned history then measured (including the paper's old curated 83→3 afternoon claim). "
+        "Those numbers are not re-used as results. Honest day-8 bad-window connect failures: "
+        f"reactive {react_fail}, circuit breaker {cb_fail}, predictive {pred_fail}.",
+    )
+
+    add_heading(doc, "5.3 Discussion", 2)
+    add_para(
+        doc,
+        "In the bad window, predictive routing eliminates primary connect attempts (0.0±0.0) via "
+        "hot-hour / risk failover and warm backup hits, outperforming reactive (~86 failures) and "
+        "still beating the circuit breaker (~3 failures), which must open after paying initial "
+        "primary failures each open cycle. Outside the bad window, circuit breaker can show fewer "
+        "connect failures than predictive when predictive briefly avoids primary after live clusters; "
+        "recovery probes mitigate but do not erase that trade-off. This is reported honestly.",
+    )
+
+    add_heading(doc, "5.4 Threats to Validity", 2)
+    add_para(
+        doc,
+        "Internal: simulator patterns (85% fail at hour 14, bursts, reset-after-47) are synthetic; "
+        "EWMA vs plain-rate choices affect sticky avoidance; sequential day-8 windows share history. "
+        "External: results may not transfer to production WAN traces or multi-region topologies. "
+        "Construct: connectFailures count physical connector failures, not end-user error rate "
+        "(success rate stays high via failover in all modes). Conclusion: limited to one flaky "
+        "configuration and n seeds; Review-1 cited more papers than this Review-2 summary.",
     )
 
     add_heading(doc, "6. CONCLUSION", 1)
     add_para(
         doc,
-        "This work designed, implemented, and evaluated a history-aware predictive JDBC connection pool for "
-        "structurally unreliable networks. The pool records attempt history, learns time-of-day and burst "
-        "patterns via EWMA and run-length analysis, scores endpoint risk before checkout, pre-emptively "
-        "reroutes to healthier backups, and pre-warms backup connections ahead of predicted bad windows.",
-    )
-    add_para(
-        doc,
-        "Key findings: (1) patterned failures can be learned from client-side attempt logs alone; "
-        "(2) predictive routing substantially reduces underlying connect failures versus reactive "
-        "primary-first failover during a known bad hour (83 → 3 in the reported afternoon trial); "
-        "(3) pre-warming provides ready backup capacity before the window opens.",
-    )
-    add_para(
-        doc,
-        "Research-gap addressal: the project closes the gap between reactive application pools and "
-        "infrastructure-heavy predictive systems by offering an infrastructure-agnostic, client-history-driven "
-        "predict/act loop inside the pool boundary.",
-    )
-    add_para(
-        doc,
-        "Limitations: evaluation uses a simulator rather than production WAN traces; risk weights/thresholds "
-        "require tuning; aggressive cluster penalties can over-avoid primary after recent bursts; full "
-        "production JDBC driver matrices and multi-region topologies are future work.",
-    )
-    add_para(
-        doc,
-        "Future scope: persist history across restarts; online auto-tuning of α/β/γ; integration with real "
-        "HikariCP as a routing decorator; richer JavaFX analytics; trace-driven evaluation on public "
-        "intermittent-connectivity datasets; optional coupling with Resilience4j for defense-in-depth.",
+        "A history-aware JDBC pool can learn structured failure patterns from its own attempts and "
+        f"pre-emptively avoid a known bad hour. Under the honest protocol, predictive mode reduced "
+        f"bad-window connect failures from {react_fail} (reactive) and {cb_fail} (circuit breaker) "
+        f"to {pred_fail}, with warm hits serving failovers. Limitations and threats above apply; "
+        "future work includes trace-driven evaluation and auto-tuned weights.",
     )
 
     add_heading(doc, "REFERENCES", 1)
     refs = [
-        '[1] S. Tuli, G. Casale, and N. R. Jennings, "PreGAN+: Semi-Supervised Fault Prediction and Preemptive Migration in Dynamic Mobile Edge Environments," IEEE Transactions on Mobile Computing, vol. 23, no. 6, pp. 6881–6895, 2024.',
-        '[2] M. Mohammad, "Resilient Microservices: A Systematic Review of Recovery Patterns, Strategies, and Evaluation Frameworks," arXiv:2512.16959, 2025.',
-        '[3] A. Nouruzi et al., "AI-Based E2E Resilient and Proactive Resource Management in Slice-Enabled 6G Networks," IEEE TNSE, vol. 12, no. 2, pp. 1311–1328, 2025.',
-        '[4] S. Tripathi et al., "GQAT-Net: A Calibrated Attention Model for Failure Prediction in Large-Scale Distributed Systems," Journal of Grid Computing, vol. 23, no. 4, art. 25, 2025.',
-        '[5] E. Ferrer et al., "Inter-Satellite Link Prediction with Supervised Learning Based on Kepler and SGP4 Orbits," Int. J. Comput. Intell. Syst., vol. 17, art. 217, 2024.',
-        '[6] C. Yan and B. Mafakheri, "Satellite Connectivity Prediction for Fast-Moving Platforms," arXiv:2508.00877, 2025.',
-        '[7] W. Symbor and Ł. Falas, "Ensuring Reliable Network Communication and Data Processing in IoT Systems with Prediction-Based Resource Allocation," Sensors, vol. 25, no. 1, art. 247, 2025.',
-        '[8] C. Zhang et al., "Deoxys: A Causal Inference Engine for Unhealthy Node Mitigation in Large-Scale Cloud Infrastructure," in Proc. ACM SoCC, 2024.',
-        '[9] W. Xiao et al., "FT-MoE: Sustainable-Learning Mixture of Experts for Fault-Tolerant Computing," arXiv:2504.20446, 2025.',
-        '[10] Y. Zhang et al., "Fault-Tolerant Scheduling Mechanism for Dynamic Edge Computing Scenarios Based on Graph Reinforcement Learning," Sensors, vol. 24, no. 21, art. 6984, 2024.',
-        '[11] C. Ji and H. Luo, "Cloud-Based AI Systems: Leveraging Large Language Models for Intelligent Fault Detection and Autonomous Self-Healing," arXiv:2505.11743, 2025.',
-        '[12] C.-W. Huang et al., "Resilient and Reliable Cloud Network Control for Mission-Critical Latency-Sensitive Service Chains," arXiv:2511.21960, 2025.',
-        '[13] N. Hayashibara et al., "The ϕ Accrual Failure Detector," in Proc. IEEE SRDS, 2004.',
-        '[14] Netflix, Inc., "Hystrix: Latency and Fault Tolerance Library," GitHub, Netflix/Hystrix.',
-        '[15] "Self-Adaptive Dynamic Connection Pool Management Method," Proc. ACM ICSIM, 2022, DOI: 10.1145/3577530.3577577.',
-        '[16] A. Aral and I. Brandic, "Learning Spatiotemporal Failure Dependencies for Resilient Edge Computing Services," IEEE TPDS, vol. 32, no. 7, pp. 1578–1590, 2021.',
+        '[1] S. Tuli et al., "PreGAN+," IEEE TMC, 2024.',
+        '[2] M. Mohammad, "Resilient Microservices…," arXiv:2512.16959, 2025.',
+        '[3] A. Nouruzi et al., "AI-Based E2E Resilient… 6G," IEEE TNSE, 2025.',
+        '[4] S. Tripathi et al., "GQAT-Net," Journal of Grid Computing, 2025.',
+        '[5] E. Ferrer et al., "Inter-Satellite Link Prediction…," 2024.',
+        '[6] C. Yan and B. Mafakheri, "Satellite Connectivity Prediction…," 2025.',
+        '[7] W. Symbor and Ł. Falas, "…IoT… Prediction-Based Resource Allocation," Sensors, 2025.',
+        '[8] C. Zhang et al., "Deoxys," ACM SoCC, 2024.',
+        '[9] W. Xiao et al., "FT-MoE," arXiv:2504.20446, 2025.',
+        '[10] Y. Zhang et al., "Fault-Tolerant Scheduling…," Sensors, 2024.',
+        '[11] C. Ji and H. Luo, "Cloud-Based AI Systems…," arXiv:2505.11743, 2025.',
+        '[12] C.-W. Huang et al., "Resilient and Reliable Cloud Network Control…," 2025.',
+        '[13] N. Hayashibara et al., "The ϕ Accrual Failure Detector," IEEE SRDS, 2004.',
+        '[14] Netflix, "Hystrix," GitHub.',
+        '[15] "Self-Adaptive Dynamic Connection Pool Management Method," ACM ICSIM, 2022.',
+        '[16] A. Aral and I. Brandic, "Learning Spatiotemporal Failure Dependencies…," IEEE TPDS, 2021.',
     ]
     for r in refs:
         add_para(doc, r, size=10, space_after=4)
 
-    add_heading(doc, "APPENDIX A — How to Run the Complete System", 1)
+    add_heading(doc, "APPENDIX A — How to Run", 1)
     add_para(
         doc,
         "cd pattern-aware-pool\n"
         "export JAVA_HOME=...(JDK 17+)\n"
         "mvn test\n"
-        "java -cp target/classes com.college.pap.demo.FullSystemDemo\n"
-        "java -cp target/classes com.college.pap.demo.ExperimentRunner\n"
-        "java -cp target/classes com.college.pap.ui.MonitoringDashboard",
+        "mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.FullSystemDemo\n"
+        "mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner",
         size=10,
     )
 
     doc.save(OUT)
     print("Wrote", OUT)
 
-    # Also markdown copy for easy reading
     md = f"""# Review-2 Complete Research Paper
 
-**Title:** History-Aware Predictive Connection Pooling: A Client-Side Learning Approach to Self-Healing JDBC Connections in Structurally Unreliable Networks
+**Authors:** Sara Sharma (23BCE0967), Tanvi Singh (23BCE2155)
 
-**Authors:** Sara Sharma (23BCE0967), Tanvi Singh (23BCE2155)  
-**Guide:** Mr. Syamasudha Veeragandham, VIT Vellore
+> Full DOCX: `{OUT.name}` — numbers loaded from `experiment_summary.csv` (n={n}).
 
-> Full formatted DOCX: `{OUT.name}`
+## Bad-window connect failures (mean±sd)
 
-## Highlight Result (Afternoon Bad Window)
 | Mode | Connect Failures / 100 req | Preemptive Failovers | Warm Hits |
 |---|---:|---:|---:|
-| Reactive | 83 | 0 | 0 |
-| Predictive | 3 | 97 | 8 |
+| Reactive | {react_fail} | 0.0±0.0 | 0.0±0.0 |
+| Circuit breaker | {cb_fail} | 0.0±0.0 | 0.0±0.0 |
+| Predictive | {pred_fail} | {pred_fo} | {pred_warm} |
 
-## Completed Software
-- Layer 1: FailureHistoryStore + PatternAnalyzer
-- Layer 2: PredictionEngine + RoutingDecider
-- Layer 3: BackupPreWarmer + WarmPool + ConnectionValidator
-- ConnectionPool (predictive + reactive baseline)
-- FlakyEndpointConnector simulator
-- ExperimentRunner + FullSystemDemo
-- RMI PoolManagementRemote + PoolLifecycle
-- MonitoringDashboard (Swing)
-- Unit/integration tests
+## Honest protocol
+7-day live learning → day-8 measure; seeded Random 1..{n}; no answer-seeding; reuseEnabled=false; simulated latency (no sleep).
+
+## Stack notes
+Swing (not JavaFX); Spring-compatible lifecycle class (not Spring); real IdleConnectionPool reuse; recovery probes; routing = score OR hot-hour OR live cluster OR reset prediction.
 
 ## Commands
 ```bash
 cd pattern-aware-pool
+export JAVA_HOME=...(JDK 17+)
 mvn test
-java -cp target/classes com.college.pap.demo.FullSystemDemo
-java -cp target/classes com.college.pap.demo.ExperimentRunner
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.FullSystemDemo
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner
 ```
 """
     MD_OUT.write_text(md, encoding="utf-8")
