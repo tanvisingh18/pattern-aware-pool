@@ -436,6 +436,9 @@ public final class ConnectionPool implements AutoCloseable {
             boolean wasReuse = idle.reuseHits() > beforeReuse;
             if (idle.physicalConnects() > beforePhysical) {
                 metrics.recordPhysicalConnect();
+                if (endpointId.equals(registry.primary())) {
+                    metrics.recordPrimaryConnectAttempt();
+                }
                 EndpointConnector connector = connectors.get(endpointId);
                 if (connector instanceof FlakyEndpointConnector flaky) {
                     connection.setLastSimulatedLatencyMs(flaky.lastSimulatedLatencyMs());

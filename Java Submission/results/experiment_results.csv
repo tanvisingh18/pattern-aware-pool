@@ -1,7 +1,7 @@
 mode,scenario,requests,success_rate,avg_latency_ms,preemptive_failovers,warm_hits,checkout_failures,connect_failures,backup_selections
-reactive,morning-healthy,100,1.0000,0.040,0,0,0,19,19
-predictive,morning-healthy,100,1.0000,0.000,57,0,0,9,65
-reactive,afternoon-bad-window,100,0.9900,0.000,0,0,1,83,81
-predictive,afternoon-bad-window,100,1.0000,0.000,97,8,0,3,100
-reactive,evening-stable,80,1.0000,0.000,0,0,0,10,10
-predictive,evening-stable,80,1.0000,0.000,6,0,0,6,12
+reactive,morning-healthy,100,1.0000,0.040,0,0,0,17,17
+predictive,morning-healthy,100,1.0000,0.000,89,0,0,4,93
+reactive,afternoon-bad-window,100,0.9900,0.000,0,0,1,91,89
+predictive,afternoon-bad-window,100,1.0000,0.000,98,8,0,2,100
+reactive,evening-stable,80,1.0000,0.000,0,0,0,11,11
+predictive,evening-stable,80,0.9875,0.000,67,0,1,10,74

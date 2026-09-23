@@ -45,10 +45,15 @@ public final class ExperimentRunner {
             String scenario,
             int requests,
             double successRate,
-            long connectFailures,
+            long userFacingConnectFailures,
+            long primaryConnectAttempts,
             long backupSelections,
             long preemptiveFailovers,
             long warmHits,
+            long recoveryProbesOk,
+            long recoveryProbesFail,
+            long backgroundPreWarmConnects,
+            long physicalConnects,
             double meanCheckoutLatencySimMs) {}
 
     public record SummaryRow(
@@ -154,6 +159,9 @@ public final class ExperimentRunner {
                     measureDay.atTime(14, 20).toInstant(ZoneOffset.UTC), 100));
             measured.add(measure(pool, clock, seed, mode, "evening-stable",
                     measureDay.atTime(18, 0).toInstant(ZoneOffset.UTC), 80));
+            measured.add(measureWindowStart(pool, clock, seed, mode, measureDay));
+            measured.addAll(measureReuseComparison(seed, mode, measureDay));
+            measured.addAll(measurePatternShift(seed, mode, startDay, measureDay));
             return measured;
         } finally {
             pool.close();
@@ -171,7 +179,7 @@ public final class ExperimentRunner {
         config.setHotHourThreshold(0.50);
         config.setHighRiskThreshold(0.55);
         config.setClusterAvoidRun(3);
-        config.setRecoveryProbeSeconds(5);
+        config.setRecoveryProbeSeconds(30);
         config.setAnalyzerPeriodSeconds(3600);
         config.setPreWarmPeriodSeconds(3600);
         return config;
@@ -233,9 +241,8 @@ public final class ExperimentRunner {
 
         for (int i = 0; i < requests; i++) {
             clock.set(windowStart.plusSeconds(i));
-            if ("predictive".equals(mode)) {
-                pool.backgroundTick();
-            }
+            // Same background cadence for every mode (fair comparison).
+            pool.backgroundTick();
             try (PapConnection ignored = pool.getConnection()) {
                 // measured
             } catch (EndpointConnector.ConnectionFailedException ignored) {
@@ -251,10 +258,15 @@ public final class ExperimentRunner {
                 scenario,
                 requests,
                 m.successRate(),
-                m.connectFailures(),
+                m.userFacingConnectFailures(),
+                m.primaryConnectAttempts(),
                 backupSelections,
                 m.preemptiveFailovers(),
                 m.warmHits(),
+                m.recoveryProbesOk(),
+                m.recoveryProbesFail(),
+                m.preWarmEvents(),
+                m.physicalConnects(),
                 m.averageLatencyMs());
     }
 
@@ -263,21 +275,117 @@ public final class ExperimentRunner {
      * directly seeded day patterns into FailureHistoryStore (not an honest
      * learn-then-measure run). Kept for before/after comparison only.
      */
+
+    /** 13:55–14:10 @ 1 req/5s; userFacingConnectFailures = failures in 14:00–14:05 only. */
+    private static ResultRow measureWindowStart(
+            ConnectionPool pool, MutableClock clock, int seed, String mode, LocalDate day) {
+        Instant start = day.atTime(13, 55).toInstant(ZoneOffset.UTC);
+        pool.metrics().reset();
+        long fail1400to1405 = 0;
+        int requests = 0;
+        for (int sec = 0; sec <= 15 * 60; sec += 5) {
+            Instant at = start.plusSeconds(sec);
+            clock.set(at);
+            pool.backgroundTick();
+            requests++;
+            try (PapConnection ignored = pool.getConnection()) {
+                // ok
+            } catch (EndpointConnector.ConnectionFailedException e) {
+                var z = at.atZone(ZoneOffset.UTC);
+                if (z.getHour() == 14 && z.getMinute() < 5) {
+                    fail1400to1405++;
+                }
+            }
+        }
+        var m = pool.metrics();
+        long backup = m.selectedEndpointCounts().getOrDefault("backup-db", 0L);
+        return new ResultRow(seed, mode, "window-start", requests, m.successRate(),
+                fail1400to1405, m.primaryConnectAttempts(), backup,
+                m.preemptiveFailovers(), m.warmHits(), m.recoveryProbesOk(), m.recoveryProbesFail(),
+                m.preWarmEvents(), m.physicalConnects(), m.averageLatencyMs());
+    }
+
+    /** Healthy-hour reuse on vs off (1000 requests each). */
+    private static List<ResultRow> measureReuseComparison(int seed, String mode, LocalDate day)
+            throws Exception {
+        List<ResultRow> out = new ArrayList<>();
+        for (boolean reuse : List.of(false, true)) {
+            MutableClock clock = MutableClock.utc(day.atTime(10, 0).toInstant(ZoneOffset.UTC));
+            EndpointId primary = new EndpointId("primary-db");
+            EndpointId backup = new EndpointId("backup-db");
+            EndpointRegistry registry = EndpointRegistry.of(primary, backup);
+            Random pr = new Random(seed * 9100L + (reuse ? 3 : 1));
+            Random br = new Random(seed * 9101L + (reuse ? 3 : 1));
+            Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
+            connectors.put(primary, FlakyEndpointConnector.forTests(
+                    primary, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock, pr));
+            connectors.put(backup, FlakyEndpointConnector.forTests(
+                    backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock, br));
+            PoolConfig config = experimentConfig();
+            config.setReuseEnabled(reuse);
+            ConnectionPool pool = switch (mode) {
+                case "predictive" -> ConnectionPool.predictiveManual(registry, connectors, config, clock);
+                case "circuit_breaker" -> ConnectionPool.circuitBreaker(registry, connectors, config, clock);
+                default -> ConnectionPool.reactiveBaseline(registry, connectors, config, clock);
+            };
+            try {
+                out.add(measure(pool, clock, seed, mode, reuse ? "reuse-on" : "reuse-off",
+                        day.atTime(10, 0).toInstant(ZoneOffset.UTC), 1000));
+            } finally {
+                pool.close();
+            }
+        }
+        return out;
+    }
+
+
+    /**
+     * Days 1–7 bad at hour 14; day 8 shifts to hour 15.
+     * Reports backup share 14:00–14:30 and connect failures 15:00–15:30.
+     */
+    private static List<ResultRow> measurePatternShift(
+            int seed, String mode, LocalDate startDay, LocalDate measureDay) throws Exception {
+        MutableClock clock = MutableClock.utc(startDay.atStartOfDay().toInstant(ZoneOffset.UTC));
+        EndpointId primary = new EndpointId("primary-db");
+        EndpointId backup = new EndpointId("backup-db");
+        EndpointRegistry registry = EndpointRegistry.of(primary, backup);
+        Random pr = new Random(seed * 7700L + 5);
+        Random br = new Random(seed * 7701L + 5);
+        FlakyEndpointConnector primaryConn = FlakyEndpointConnector.forTests(
+                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock, pr);
+        Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
+        connectors.put(primary, primaryConn);
+        connectors.put(backup, FlakyEndpointConnector.forTests(
+                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock, br));
+        PoolConfig config = experimentConfig();
+        ConnectionPool pool = switch (mode) {
+            case "predictive" -> ConnectionPool.predictiveManual(registry, connectors, config, clock);
+            case "circuit_breaker" -> ConnectionPool.circuitBreaker(registry, connectors, config, clock);
+            default -> ConnectionPool.reactiveBaseline(registry, connectors, config, clock);
+        };
+        try {
+            driveLearning(pool, clock, startDay);
+            primaryConn.setBadHourOverride(15);
+            ResultRow at14 = measure(pool, clock, seed, mode, "pattern-shift-h14",
+                    measureDay.atTime(14, 0).toInstant(ZoneOffset.UTC), 90);
+            ResultRow at15 = measure(pool, clock, seed, mode, "pattern-shift-h15",
+                    measureDay.atTime(15, 0).toInstant(ZoneOffset.UTC), 90);
+            return List.of(at14, at15);
+        } finally {
+            pool.close();
+        }
+    }
+
     static void writeBeforeFixesBaseline(Path path) throws IOException {
         String csv = """
-                # AUDIT BASELINE (expected-before) — reproduced targets from the pre-fix
-                # ExperimentRunner that seeded history with patterned answers, then measured.
-                # NOT produced by the honest 7-day learning protocol in this class.
-                mode,scenario,requests,success_rate,connect_failures,preemptive_failovers,warm_hits,backup_selections,notes
-                reactive,afternoon-bad-window,100,0.9900,83,0,0,81,paper-curated audit target (83→3 claim)
-                predictive,afternoon-bad-window,100,1.0000,3,97,8,100,paper-curated audit target (83→3 claim)
-                reactive,morning-healthy,100,1.0000,19,0,0,19,seeded-history demo run
-                predictive,morning-healthy,100,1.0000,9,57,0,65,seeded-history demo run
-                reactive,evening-stable,80,1.0000,10,0,0,10,seeded-history demo run
-                predictive,evening-stable,80,1.0000,6,6,0,12,seeded-history demo run
+                # before_fixes.csv — curated audit targets removed.
+                # See FIXES.md for the measured remediation table.
+                note,value
+                status,removed_curated_baseline
+                see,FIXES.md
                 """;
         Files.writeString(path, csv, StandardCharsets.UTF_8);
-        System.out.println("Wrote " + path.toAbsolutePath());
+        System.out.println("Wrote " + path.toAbsolutePath() + " (pointer to FIXES.md)");
     }
 
     static List<SummaryRow> summarize(List<ResultRow> rows) {
@@ -294,8 +402,8 @@ public final class ExperimentRunner {
                     parts[0],
                     parts[1],
                     g.size(),
-                    mean(g, r -> r.connectFailures()),
-                    sd(g, r -> r.connectFailures()),
+                    mean(g, r -> r.userFacingConnectFailures()),
+                    sd(g, r -> r.userFacingConnectFailures()),
                     mean(g, r -> r.successRate()),
                     sd(g, r -> r.successRate()),
                     mean(g, r -> r.backupSelections()),
@@ -337,18 +445,25 @@ public final class ExperimentRunner {
 
     private static void writeRunsCsv(Path path, List<ResultRow> rows) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("seed,mode,scenario,requests,success_rate,connect_failures,backup_selections,")
-                .append("preemptive_failovers,warm_hits,mean_checkout_latency_sim_ms\n");
+        sb.append("seed,mode,scenario,requests,success_rate,user_facing_connect_failures,")
+                .append("primary_connect_attempts,backup_selections,preemptive_failovers,warm_hits,")
+                .append("recovery_probes_ok,recovery_probes_fail,background_prewarm_connects,")
+                .append("physical_connects,mean_checkout_latency_sim_ms\n");
         for (ResultRow r : rows) {
             sb.append(r.seed()).append(',')
                     .append(r.mode()).append(',')
                     .append(r.scenario()).append(',')
                     .append(r.requests()).append(',')
                     .append(String.format(Locale.US, "%.4f", r.successRate())).append(',')
-                    .append(r.connectFailures()).append(',')
+                    .append(r.userFacingConnectFailures()).append(',')
+                    .append(r.primaryConnectAttempts()).append(',')
                     .append(r.backupSelections()).append(',')
                     .append(r.preemptiveFailovers()).append(',')
                     .append(r.warmHits()).append(',')
+                    .append(r.recoveryProbesOk()).append(',')
+                    .append(r.recoveryProbesFail()).append(',')
+                    .append(r.backgroundPreWarmConnects()).append(',')
+                    .append(r.physicalConnects()).append(',')
                     .append(String.format(Locale.US, "%.3f", r.meanCheckoutLatencySimMs())).append('\n');
         }
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);

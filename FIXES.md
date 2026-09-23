@@ -19,6 +19,7 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | JDBC pool unsafe (open tx, closed proxy, blocking borrow, validate under lock) | Release rollback + restore defaults; closed proxy; `borrowTimeoutMillis`/`validationIdleMillis`; validate outside lock; credential `getConnection` unsupported | `PoolSafetyTest` (6) | `f926b76` |
 | Hourly learning depended on ring buffer; reuse recorded as attempts | Remove `ensureCountersFromHistory`; hourly stats only via `observe()`; inject clock for `computedAt`; skip reuse in `acquireAndRecord` | `PatternAnalyzerTest.hourlyLearningSurvivesRingBufferEviction` | *(item 2)* |
 | Hot-hour gating used lifetime plain rate | Gate on EWMA after ≥ hotHourMinSamples; plain rate display-only | `HotHourEwmaCooldownTest` | *(item 3)* |
+| Experiments: recovery=5s; ticks predictive-only; curated before_fixes; missing scenarios | recoveryProbeSeconds=30; backgroundTick all modes; CSV columns for probes/prewarm/physical/user-facing; window-start, pattern-shift, reuse; before_fixes→FIXES.md | ExperimentRunner n=30 | *(item 4)* | |
 
 ## Before vs after (bad-window connect failures / 100 req)
 
@@ -65,3 +66,8 @@ mvn test
 mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner
 # optional: .venv/bin/python docs/generate_review2_paper.py
 ```
+
+
+## Item 4 experiment summary (n=30)
+
+See `pattern-aware-pool/docs/results/experiment_summary.csv` (regenerated; do not hand-edit).

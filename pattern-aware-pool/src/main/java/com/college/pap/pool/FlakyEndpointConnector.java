@@ -82,6 +82,8 @@ public final class FlakyEndpointConnector implements EndpointConnector {
 
     private final EndpointId endpointId;
     private final PatternConfig config;
+    private final java.util.concurrent.atomic.AtomicInteger badHourOverride =
+            new java.util.concurrent.atomic.AtomicInteger(Integer.MIN_VALUE);
     private final Clock clock;
     private final boolean sleepEnabled;
     private final Random random;
@@ -128,6 +130,16 @@ public final class FlakyEndpointConnector implements EndpointConnector {
         return endpointId;
     }
 
+    /** Override PatternConfig.badHour for pattern-shift experiments. Negative clears. */
+    public void setBadHourOverride(int hour) {
+        badHourOverride.set(hour);
+    }
+
+    private int effectiveBadHour() {
+        int o = badHourOverride.get();
+        return o == Integer.MIN_VALUE ? config.badHour : o;
+    }
+
     @Override
     public PapConnection connect() throws ConnectionFailedException {
         Instant now = clock.instant();
@@ -135,14 +147,14 @@ public final class FlakyEndpointConnector implements EndpointConnector {
         Random rng = random != null ? random : ThreadLocalRandom.current();
 
         if (shouldFail(hour, rng)) {
-            long latency = (config.badHour >= 0 && hour == config.badHour)
+            long latency = (effectiveBadHour() >= 0 && hour == effectiveBadHour())
                     ? config.badHourFailLatencyMs
                     : config.failLatencyMs;
             lastSimulatedLatencyMs.set(latency);
             pause(latency);
             ConnectionFailedException ex = new ConnectionFailedException(
                     "simulated failure on " + endpointId + " at hour " + hour,
-                    hour == config.badHour ? FailureType.TIMEOUT : FailureType.NETWORK_UNREACHABLE);
+                    hour == effectiveBadHour() ? FailureType.TIMEOUT : FailureType.NETWORK_UNREACHABLE);
             ex.setSimulatedLatencyMs(latency);
             throw ex;
         }
@@ -165,7 +177,7 @@ public final class FlakyEndpointConnector implements EndpointConnector {
             remainingBurst.decrementAndGet();
             return true;
         }
-        if (config.badHour >= 0 && hour == config.badHour) {
+        if (effectiveBadHour() >= 0 && hour == effectiveBadHour()) {
             return rng.nextDouble() < config.badHourFailRate;
         }
         if (config.burstSize > 0 && rng.nextDouble() < config.burstTriggerChance) {

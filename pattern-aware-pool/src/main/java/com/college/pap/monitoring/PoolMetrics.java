@@ -23,6 +23,7 @@ public final class PoolMetrics {
     private final LongAdder recoveryProbesOk = new LongAdder();
     private final LongAdder recoveryProbesFail = new LongAdder();
     private final LongAdder physicalConnects = new LongAdder();
+    private final LongAdder primaryConnectAttempts = new LongAdder();
     private final LongAdder reuseHits = new LongAdder();
     private final AtomicLong totalCheckoutLatencyMs = new AtomicLong();
     private final Map<String, LongAdder> selectedEndpointCounts = new ConcurrentHashMap<>();
@@ -33,6 +34,10 @@ public final class PoolMetrics {
 
     public void recordPhysicalConnect() {
         physicalConnects.increment();
+    }
+
+    public void recordPrimaryConnectAttempt() {
+        primaryConnectAttempts.increment();
     }
 
     public void recordReuseHit() {
@@ -118,6 +123,15 @@ public final class PoolMetrics {
         return physicalConnects.sum();
     }
 
+    public long primaryConnectAttempts() {
+        return primaryConnectAttempts.sum();
+    }
+
+    /** User-facing checkout failures (excludes pool-exhaustion and probe accounting). */
+    public long userFacingConnectFailures() {
+        return connectFailures.sum();
+    }
+
     public long reuseHits() {
         return reuseHits.sum();
     }
@@ -177,6 +191,7 @@ public final class PoolMetrics {
         recoveryProbesOk.reset();
         recoveryProbesFail.reset();
         physicalConnects.reset();
+        primaryConnectAttempts.reset();
         reuseHits.reset();
         totalCheckoutLatencyMs.set(0);
         selectedEndpointCounts.clear();

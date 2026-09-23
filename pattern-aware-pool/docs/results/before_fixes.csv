@@ -1,10 +1,5 @@
-# AUDIT BASELINE (expected-before) — reproduced targets from the pre-fix
-# ExperimentRunner that seeded history with patterned answers, then measured.
-# NOT produced by the honest 7-day learning protocol in this class.
-mode,scenario,requests,success_rate,connect_failures,preemptive_failovers,warm_hits,backup_selections,notes
-reactive,afternoon-bad-window,100,0.9900,83,0,0,81,paper-curated audit target (83→3 claim)
-predictive,afternoon-bad-window,100,1.0000,3,97,8,100,paper-curated audit target (83→3 claim)
-reactive,morning-healthy,100,1.0000,19,0,0,19,seeded-history demo run
-predictive,morning-healthy,100,1.0000,9,57,0,65,seeded-history demo run
-reactive,evening-stable,80,1.0000,10,0,0,10,seeded-history demo run
-predictive,evening-stable,80,1.0000,6,6,0,12,seeded-history demo run
+# before_fixes.csv — curated audit targets removed.
+# See FIXES.md for the measured remediation table.
+note,value
+status,removed_curated_baseline
+see,FIXES.md
