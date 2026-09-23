@@ -22,46 +22,62 @@ Review-1 artefacts (including the 21-paper survey) are **left untouched**.
 | Experiments: recovery=5s; ticks predictive-only; curated before_fixes; missing scenarios | recoveryProbeSeconds=30; backgroundTick all modes; CSV columns for probes/prewarm/physical/user-facing; window-start, pattern-shift, reuse; before_fixes→FIXES.md | ExperimentRunner n=30 | `1757e40` |
 | Paper used audit/honest/curated wording; inconsistent sections; missing scenarios | Strip forbidden wording; Roman I–VIII; user-facing failures + probe/prewarm columns; window-start / pattern-shift / reuse; healthy-hour backup share | paper regen from CSV | `1fba801` |
 | No Maven wrapper; README pointed at `../.tools`; demo lacked recovery/PooledDataSource; RMI incomplete | `./mvnw`; README uses wrapper; RealJdbcDeployDemo recovery + SESSION_ID reuse; RMI hotHourThreshold/clusterAvoidRun/recoveryProbeSeconds; real RMI test + unexport | `PoolManagementServiceTest` + `./mvnw test` | `193b7bf` |
+| Window-start undercounted (exceptions only) + clock rewind; reuse latency charged physical MS; uneven window lengths | UF failures = `metrics.userFacingConnectFailures()` delta in [14:00,14:05); day-8 chronological + monotonic-clock assert; reuse hits = 0 ms; morning/evening/pattern-shift 30 min @ 1/18s (100); paper headline = window-start vs CB | `ReuseLatencyTest` + ExperimentRunner n=30 | *(this change)* |
 
 ## Before vs after (bad-window user-facing connect failures / 100 req)
 
 | Source | Reactive | Circuit breaker | Predictive |
 |---|---:|---:|---:|
 | **Before (seeded-history targets)** — see note | 83 (old claim) | *(not measured)* | 3 (old claim) |
-| **After (measured n=30)** — `experiment_summary.csv` | **85.9±4.0** | **3.2±1.1** | **0.8±0.7** |
+| **After (measured n=30)** — `experiment_summary.csv` | **85.6±3.7** | **3.8±1.5** | **0.3±0.7** |
 
 Notes:
 - Before numbers are old seeded-history demo targets, not a learn-then-measure protocol. `before_fixes.csv` is now a pointer to this file.
 - After numbers are measured mean±sd over Random seeds 1..30 (do not hand-edit).
 
+### Headline: window-start user-facing failures (14:00–14:05, n=30)
+
+| Mode | User-facing failures |
+|---|---:|
+| Reactive | **51.1±2.7** (~0.85 × 60 ≈ 51 expected) |
+| Circuit breaker | **8.0±2.2** |
+| Predictive | **0.8±1.1** |
+
 ### Other after metrics (bad-window, predictive, n=30)
 
-- Preemptive failovers: **99.2±0.8**
-- Warm hits: **99.2±0.8**
-- Recovery probes ok/fail: **0.6±0.7 / 3.4±0.7**
-- Background pre-warm connects: **98.5±0.7**
+- Preemptive failovers: **99.7±0.8**
+- Warm hits: **99.7±0.8**
+- Recovery probes ok/fail: **0.5±0.8 / 3.5±0.8**
+- Background pre-warm connects: **98.7±0.9**
 - Primary connect attempts: **0.0±0.2**
 - Success rate: **100.0%±0.0**
 
 ### Additional measured scenarios (predictive, n=30)
 
-| Scenario | User-facing failures | Notes |
-|---|---:|---|
-| window-start (14:00–14:05 slice) | **0.0±0.0** | 13:55–14:10 @ 1 req/5s |
-| pattern-shift-h14 backup share | **74.8±14.2** selections | learned hour 14; day 8 hour 14 healthy |
-| pattern-shift-h15 failures | **0.7±0.8** | day 8 bad hour moved to 15 |
-| reuse-off physical connects | **999.9±0.3** | 1000 healthy-hour requests |
-| reuse-on physical connects | **1.0±0.0** | same load with reuse |
-| morning-healthy backup share | **80.5±14.0** (pred) vs **88.8±12.1** (CB) | CB stays open longer after bursts |
+| Scenario | User-facing failures / notes |
+|---|---|
+| pattern-shift-h14 backup selections | **33.5±13.5** (learned hour 14; day 8 hour 14 healthier) |
+| pattern-shift-h15 failures | **3.5±2.0** (day 8 bad hour moved to 15) |
+| reuse-off physical connects / mean latency | **999.9±0.3** / **20.00±0.01** ms |
+| reuse-on physical connects / mean latency | **1.0±0.0** / **0.02±0.00** ms (idle-pool reuse = 0 ms) |
+| morning-healthy backup share | **29.3±9.7** (pred) vs **35.6±10.9** (CB) |
+| morning-healthy UF failures | **9.7±2.3** (pred) vs **16.1±4.2** (CB) |
 
-## `./mvnw test` summary (after items 5–6)
+### Window lengths (stated in summary + paper)
+
+- morning-healthy, evening-stable, pattern-shift-h14/h15: **30 min @ 1 req / 18 s** (100 requests)
+- bad-window: **100 requests @ 1 req / 1 s** (unchanged)
+- window-start: **13:55–14:10 @ 1 req / 5 s**; UF failures = metrics delta in **14:00–14:05**
+- reuse-on/off: **1000 requests @ 1 req / 1 s** in a healthy hour
+
+## `./mvnw test` summary (after experiment fixes)
 
 ```
-Tests run: 29, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 30, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-(JDK 17+ / Temurin 25; Maven Wrapper 3.9.9)
+(JDK 17+ / Temurin 25; Maven Wrapper 3.9.9; includes `ReuseLatencyTest`)
 
 ## Remaining limitations
 

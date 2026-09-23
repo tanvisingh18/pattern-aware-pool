@@ -446,6 +446,8 @@ public final class ConnectionPool implements AutoCloseable {
             }
             if (wasReuse) {
                 metrics.recordReuseHit();
+                // Reuse hits carry no connect latency — only physical connects do.
+                connection.setLastSimulatedLatencyMs(0);
             }
             // Idle reuse hits are not recorded as connection attempts (hourly learning).
             if (!wasReuse) {

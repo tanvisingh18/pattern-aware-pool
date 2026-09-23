@@ -39,6 +39,14 @@ public final class ExperimentRunner {
     public static final int LEARNING_DAYS = 7;
     public static final int REQUESTS_PER_HOUR = 12;
 
+    /** Morning / evening / pattern-shift: 30-minute window @ 1 request / 18 s → 100 requests. */
+    public static final int STANDARD_WINDOW_REQUESTS = 100;
+    public static final long STANDARD_REQUEST_INTERVAL_SECONDS = 18;
+    /** Bad-window keeps dense 1 request / 1 s for 100 requests. */
+    public static final long BAD_WINDOW_REQUEST_INTERVAL_SECONDS = 1;
+    /** Window-start: 13:55–14:10 @ 1 request / 5 s. */
+    public static final long WINDOW_START_INTERVAL_SECONDS = 5;
+
     public record ResultRow(
             int seed,
             String mode,
@@ -125,6 +133,21 @@ public final class ExperimentRunner {
         }
 
         printSummary(summary);
+        printWindowStartSanity(summary);
+    }
+
+    /** Reactive 14:00–14:05 should be ~0.85 × 60 ≈ 51 user-facing failures. */
+    static void printWindowStartSanity(List<SummaryRow> summary) {
+        for (SummaryRow r : summary) {
+            if ("reactive".equals(r.mode()) && "window-start".equals(r.scenario())) {
+                System.out.printf(Locale.US,
+                        "SANITY window-start reactive user-facing failures mean=%.1f "
+                                + "(expect ~51 = 0.85 × 60 requests in 14:00–14:05)%n",
+                        r.meanUserFacingFailures());
+                return;
+            }
+        }
+        System.out.println("SANITY window-start: reactive row missing");
     }
 
     static List<ResultRow> runSeed(int seed) throws Exception {
@@ -164,21 +187,40 @@ public final class ExperimentRunner {
         try {
             driveLearning(pool, clock, startDay);
             LocalDate measureDay = startDay.plusDays(LEARNING_DAYS);
-            // Chronological day-8 windows so MutableClock / circuit state advance forward.
+            // Monotonic day-8 order: morning → window-start → bad-window → evening.
+            Instant[] lastClock = { clock.instant() };
             List<ResultRow> measured = new ArrayList<>();
-            measured.add(measure(pool, clock, seed, mode, "morning-healthy",
-                    measureDay.atTime(9, 15).toInstant(ZoneOffset.UTC), 100));
-            measured.add(measure(pool, clock, seed, mode, "bad-window",
-                    measureDay.atTime(14, 20).toInstant(ZoneOffset.UTC), 100));
-            measured.add(measure(pool, clock, seed, mode, "evening-stable",
-                    measureDay.atTime(18, 0).toInstant(ZoneOffset.UTC), 80));
-            measured.add(measureWindowStart(pool, clock, seed, mode, measureDay));
+            measured.add(measure(pool, clock, lastClock, seed, mode, "morning-healthy",
+                    measureDay.atTime(9, 0).toInstant(ZoneOffset.UTC),
+                    STANDARD_WINDOW_REQUESTS, STANDARD_REQUEST_INTERVAL_SECONDS));
+            measured.add(measureWindowStart(pool, clock, lastClock, seed, mode, measureDay));
+            measured.add(measure(pool, clock, lastClock, seed, mode, "bad-window",
+                    measureDay.atTime(14, 20).toInstant(ZoneOffset.UTC),
+                    STANDARD_WINDOW_REQUESTS, BAD_WINDOW_REQUEST_INTERVAL_SECONDS));
+            measured.add(measure(pool, clock, lastClock, seed, mode, "evening-stable",
+                    measureDay.atTime(18, 0).toInstant(ZoneOffset.UTC),
+                    STANDARD_WINDOW_REQUESTS, STANDARD_REQUEST_INTERVAL_SECONDS));
             measured.addAll(measureReuseComparison(seed, mode, measureDay));
             measured.addAll(measurePatternShift(seed, mode, startDay, measureDay));
             return measured;
         } finally {
             pool.close();
         }
+    }
+
+    /**
+     * Advances the shared {@link MutableClock} and records the latest instant.
+     * Throws if a measurement would move the clock earlier than the previous
+     * measurement on the same pool.
+     */
+    static void advanceClock(MutableClock clock, Instant[] lastClock, Instant at) {
+        if (lastClock[0] != null && at.isBefore(lastClock[0])) {
+            throw new IllegalStateException(
+                    "measurement clock went backwards on the same pool: last="
+                            + lastClock[0] + " next=" + at);
+        }
+        clock.set(at);
+        lastClock[0] = at;
     }
 
     private static PoolConfig experimentConfig() {
@@ -238,22 +280,33 @@ public final class ExperimentRunner {
     private static ResultRow measure(
             ConnectionPool pool,
             MutableClock clock,
+            Instant[] lastClock,
             int seed,
             String mode,
             String scenario,
             Instant windowStart,
-            int requests) {
-        // Brief pre-warm opportunity for predictive before bad window.
+            int requests,
+            long intervalSeconds) {
+        // Predictive pre-warm ticks only advance forward (never rewind past lastClock).
         if ("predictive".equals(mode) && "bad-window".equals(scenario)) {
-            clock.set(windowStart.minus(Duration.ofMinutes(30)));
-            pool.backgroundTick();
-            clock.set(windowStart.minus(Duration.ofMinutes(10)));
-            pool.backgroundTick();
+            Instant lead30 = windowStart.minus(Duration.ofMinutes(30));
+            Instant lead10 = windowStart.minus(Duration.ofMinutes(10));
+            if (lastClock[0] == null || !lead30.isBefore(lastClock[0])) {
+                advanceClock(clock, lastClock, lead30);
+                pool.backgroundTick();
+            }
+            if (lastClock[0] == null || !lead10.isBefore(lastClock[0])) {
+                advanceClock(clock, lastClock, lead10);
+                pool.backgroundTick();
+            } else {
+                pool.backgroundTick();
+            }
         }
         pool.metrics().reset();
 
         for (int i = 0; i < requests; i++) {
-            clock.set(windowStart.plusSeconds(i));
+            Instant at = windowStart.plusSeconds(i * intervalSeconds);
+            advanceClock(clock, lastClock, at);
             // Same background cadence for every mode (fair comparison).
             pool.backgroundTick();
             try (PapConnection ignored = pool.getConnection()) {
@@ -284,25 +337,38 @@ public final class ExperimentRunner {
                 m.p95LatencyMs());
     }
 
-    /** 13:55–14:10 @ 1 req/5s; userFacingConnectFailures = failures in 14:00–14:05 only. */
+    /**
+     * 13:55–14:10 @ 1 req/5s. User-facing failures = increase in
+     * {@code metrics.userFacingConnectFailures()} for requests whose timestamp
+     * lies in [14:00:00, 14:05:00) — same metric definition as other scenarios.
+     */
     private static ResultRow measureWindowStart(
-            ConnectionPool pool, MutableClock clock, int seed, String mode, LocalDate day) {
+            ConnectionPool pool,
+            MutableClock clock,
+            Instant[] lastClock,
+            int seed,
+            String mode,
+            LocalDate day) {
         Instant start = day.atTime(13, 55).toInstant(ZoneOffset.UTC);
+        Instant sliceStart = day.atTime(14, 0).toInstant(ZoneOffset.UTC);
+        Instant sliceEnd = day.atTime(14, 5).toInstant(ZoneOffset.UTC);
         pool.metrics().reset();
         long fail1400to1405 = 0;
         int requests = 0;
-        for (int sec = 0; sec <= 15 * 60; sec += 5) {
+        for (long sec = 0; sec <= 15 * 60; sec += WINDOW_START_INTERVAL_SECONDS) {
             Instant at = start.plusSeconds(sec);
-            clock.set(at);
+            advanceClock(clock, lastClock, at);
             pool.backgroundTick();
             requests++;
+            long before = pool.metrics().userFacingConnectFailures();
             try (PapConnection ignored = pool.getConnection()) {
-                // ok
-            } catch (EndpointConnector.ConnectionFailedException e) {
-                var z = at.atZone(ZoneOffset.UTC);
-                if (z.getHour() == 14 && z.getMinute() < 5) {
-                    fail1400to1405++;
-                }
+                // ok or failover success
+            } catch (EndpointConnector.ConnectionFailedException ignored) {
+                // counted in metrics
+            }
+            long delta = pool.metrics().userFacingConnectFailures() - before;
+            if (!at.isBefore(sliceStart) && at.isBefore(sliceEnd)) {
+                fail1400to1405 += delta;
             }
         }
         var m = pool.metrics();
@@ -313,12 +379,13 @@ public final class ExperimentRunner {
                 m.preWarmEvents(), m.physicalConnects(), m.averageLatencyMs(), m.p95LatencyMs());
     }
 
-    /** Healthy-hour reuse on vs off (1000 requests each). */
+    /** Healthy-hour reuse on vs off (1000 requests each; own pool, own clock). */
     private static List<ResultRow> measureReuseComparison(int seed, String mode, LocalDate day)
             throws Exception {
         List<ResultRow> out = new ArrayList<>();
         for (boolean reuse : List.of(false, true)) {
             MutableClock clock = MutableClock.utc(day.atTime(10, 0).toInstant(ZoneOffset.UTC));
+            Instant[] lastClock = { null };
             EndpointId primary = new EndpointId("primary-db");
             EndpointId backup = new EndpointId("backup-db");
             EndpointRegistry registry = EndpointRegistry.of(primary, backup);
@@ -337,8 +404,8 @@ public final class ExperimentRunner {
                 default -> ConnectionPool.reactiveBaseline(registry, connectors, config, clock);
             };
             try {
-                out.add(measure(pool, clock, seed, mode, reuse ? "reuse-on" : "reuse-off",
-                        day.atTime(10, 0).toInstant(ZoneOffset.UTC), 1000));
+                out.add(measure(pool, clock, lastClock, seed, mode, reuse ? "reuse-on" : "reuse-off",
+                        day.atTime(10, 0).toInstant(ZoneOffset.UTC), 1000, 1));
             } finally {
                 pool.close();
             }
@@ -346,10 +413,9 @@ public final class ExperimentRunner {
         return out;
     }
 
-
     /**
      * Days 1–7 bad at hour 14; day 8 shifts to hour 15.
-     * Reports backup share 14:00–14:30 and connect failures 15:00–15:30.
+     * Each slice is a 30-minute window @ 1 request / 18 s (100 requests).
      */
     private static List<ResultRow> measurePatternShift(
             int seed, String mode, LocalDate startDay, LocalDate measureDay) throws Exception {
@@ -373,11 +439,14 @@ public final class ExperimentRunner {
         };
         try {
             driveLearning(pool, clock, startDay);
+            Instant[] lastClock = { clock.instant() };
             primaryConn.setBadHourOverride(15);
-            ResultRow at14 = measure(pool, clock, seed, mode, "pattern-shift-h14",
-                    measureDay.atTime(14, 0).toInstant(ZoneOffset.UTC), 90);
-            ResultRow at15 = measure(pool, clock, seed, mode, "pattern-shift-h15",
-                    measureDay.atTime(15, 0).toInstant(ZoneOffset.UTC), 90);
+            ResultRow at14 = measure(pool, clock, lastClock, seed, mode, "pattern-shift-h14",
+                    measureDay.atTime(14, 0).toInstant(ZoneOffset.UTC),
+                    STANDARD_WINDOW_REQUESTS, STANDARD_REQUEST_INTERVAL_SECONDS);
+            ResultRow at15 = measure(pool, clock, lastClock, seed, mode, "pattern-shift-h15",
+                    measureDay.atTime(15, 0).toInstant(ZoneOffset.UTC),
+                    STANDARD_WINDOW_REQUESTS, STANDARD_REQUEST_INTERVAL_SECONDS);
             return List.of(at14, at15);
         } finally {
             pool.close();
@@ -547,8 +616,14 @@ public final class ExperimentRunner {
         sb.append("- Learning: ").append(LEARNING_DAYS)
                 .append(" days × 24h × ").append(REQUESTS_PER_HOUR)
                 .append(" req/h via live FlakyEndpointConnector (no answer-seeding)\n");
-        sb.append("- Measurement: day 8 windows; routing experiments use `reuseEnabled=false`; ")
-                .append("latency = simulated ms (no sleep)\n");
+        sb.append("- Measurement: day 8 windows (chronological: morning → window-start → bad-window → evening); ")
+                .append("routing experiments use `reuseEnabled=false`; latency = simulated ms (no sleep)\n");
+        sb.append("- Window lengths / spacing:\n");
+        sb.append("  - morning-healthy, evening-stable, pattern-shift-h14/h15: **30 min @ 1 req / 18 s** (100 requests)\n");
+        sb.append("  - bad-window: **100 requests @ 1 req / 1 s** (dense, unchanged)\n");
+        sb.append("  - window-start: **13:55–14:10 @ 1 req / 5 s**; user-facing failures counted in **14:00–14:05** ")
+                .append("via `metrics.userFacingConnectFailures()` deltas (~60 requests in-slice)\n");
+        sb.append("  - reuse-on/off: **1000 requests @ 1 req / 1 s** in a healthy hour (own pool)\n");
         sb.append("- Modes: reactive, circuit_breaker (open after 3 primary fails / 60s / half-open probe), predictive\n");
         sb.append("- recoveryProbeSeconds=30; backgroundTick cadence identical across modes\n");
         sb.append(String.format(Locale.US, "- Wall time: %.1fs%n%n", elapsedSec));

@@ -290,12 +290,18 @@ def build():
         doc,
         f"Seeds: Random 1..{n}. Learning: 7 days × 24h × 12 req/h through live FlakyEndpointConnector "
         "while advancing MutableClock and calling backgroundTick every 30s simulated for every mode "
-        "(identical cadence). recoveryProbeSeconds=30. Day 8 windows: morning-healthy 09:15 (100), "
-        "bad-window 14:20 (100), evening-stable 18:00 (80), plus window-start (13:55–14:10), "
-        "pattern-shift, and reuse on/off. PoolConfig.reuseEnabled=false for routing experiments. "
-        "Latency is simulated (connectors do not Thread.sleep). History is not seeded with day-8 answers. "
-        "User-facing connect failures are reported separately from primary connect attempts, recovery probes, "
-        "and background pre-warm connects. Results: experiment_runs.csv / experiment_summary.csv.",
+        "(identical cadence). recoveryProbeSeconds=30. Day-8 measurements are chronological on one pool "
+        "(morning → window-start → bad-window → evening) with a monotonic-clock assertion. "
+        "Window length and request spacing: morning-healthy 09:00–09:30 at 1 req/18 s (100); "
+        "window-start 13:55–14:10 at 1 req/5 s (user-facing failures counted as the metrics delta in "
+        "[14:00:00, 14:05:00)); bad-window 14:20–14:21:40 at 1 req/s (100); "
+        "evening-stable 18:00–18:30 at 1 req/18 s (100); pattern-shift-h14 14:00–14:30 and "
+        "pattern-shift-h15 15:00–15:30 at 1 req/18 s (100 each); reuse on/off 1000 healthy-hour requests. "
+        "PoolConfig.reuseEnabled=false for routing experiments. Latency is simulated (connectors do not "
+        "Thread.sleep); idle-pool reuse hits record 0 ms connect latency. History is not seeded with "
+        "day-8 answers. User-facing connect failures are reported separately from primary connect "
+        "attempts, recovery probes, and background pre-warm connects. Results: experiment_runs.csv / "
+        "experiment_summary.csv.",
     )
 
     add_heading(doc, "VII. RESULTS AND DISCUSSION", 1)
@@ -314,9 +320,9 @@ def build():
         ("reactive", "bad-window", "100"),
         ("circuit_breaker", "bad-window", "100"),
         ("predictive", "bad-window", "100"),
-        ("reactive", "evening-stable", "80"),
-        ("circuit_breaker", "evening-stable", "80"),
-        ("predictive", "evening-stable", "80"),
+        ("reactive", "evening-stable", "100"),
+        ("circuit_breaker", "evening-stable", "100"),
+        ("predictive", "evening-stable", "100"),
     ]:
         r = find_row(summary, mode, scenario)
         table_rows.append(
@@ -355,13 +361,14 @@ def build():
     add_heading(doc, "VII.B Additional Scenarios", 2)
     add_para(
         doc,
-        f"Window-start (13:55–14:10; failures counted only in 14:00–14:05): reactive {uf(win_r)}, "
-        f"circuit breaker {uf(win_c)}, predictive {uf(win_p)} user-facing connect failures.",
+        f"Window-start (13:55–14:10 at 1 req/5 s; user-facing failures = metrics delta in 14:00–14:05): "
+        f"reactive {uf(win_r)}, circuit breaker {uf(win_c)}, predictive {uf(win_p)}.",
     )
     add_para(
         doc,
-        f"Pattern-shift (learn hour 14 for 7 days; day 8 bad hour moves to 15): at 14:00–14:30 predictive "
-        f"backup selections {fmt(shift14['mean_backup_selections'], shift14['sd_backup_selections'])} "
+        f"Pattern-shift (learn hour 14 for 7 days; day 8 bad hour moves to 15; 30 min at 1 req/18 s each): "
+        f"at 14:00–14:30 predictive backup selections "
+        f"{fmt(shift14['mean_backup_selections'], shift14['sd_backup_selections'])} "
         f"with {uf(shift14)} user-facing failures; at 15:00–15:30 user-facing failures {uf(shift15)} "
         f"with backup share {fmt(shift15['mean_backup_selections'], shift15['sd_backup_selections'])}.",
     )
@@ -382,13 +389,17 @@ def build():
     add_heading(doc, "VII.C Discussion", 2)
     add_para(
         doc,
-        "In the bad window, predictive routing nearly eliminates user-facing connect failures via "
-        "hot-hour / risk failover and warm backup hits, outperforming reactive and still beating the "
-        "circuit breaker, which must open after paying initial primary failures each open cycle. "
-        f"Healthy-hour backup share is {morn_p_backup} for predictive versus {morn_c_backup} for the "
-        "circuit breaker (CB remains open longer after morning bursts); predictive still reports fewer "
-        "user-facing connect failures in that window. Probe and pre-warm connects are background work and "
-        "are not counted as user-facing connect failures.",
+        f"Headline comparison against the circuit breaker is window-start — user-facing connect failures "
+        f"in the first five minutes of the known bad hour (14:00–14:05): reactive {uf(win_r)}, "
+        f"circuit breaker {uf(win_c)}, predictive {uf(win_p)}. Predictive avoids nearly all of those "
+        f"failures by failing over before the hour starts; the circuit breaker still pays open-cycle "
+        f"primary failures, and reactive absorbs roughly the expected 0.85 × 60 ≈ 51 failures. "
+        f"In the mid-hour bad window, predictive again nearly eliminates user-facing connect failures via "
+        f"hot-hour / risk failover and warm backup hits, outperforming reactive and still beating the "
+        f"circuit breaker. Healthy-hour backup share is {morn_p_backup} for predictive versus "
+        f"{morn_c_backup} for the circuit breaker (CB remains open longer after morning bursts); "
+        f"predictive still reports fewer user-facing connect failures in that window. Probe and pre-warm "
+        f"connects are background work and are not counted as user-facing connect failures.",
     )
 
     add_heading(doc, "VII.D Threats to Validity", 2)
@@ -461,19 +472,26 @@ def build():
 | Circuit breaker | {cb_fail} | 0.0±0.0 | 0.0±0.0 | — | — |
 | Predictive | {pred_fail} | {pred_fo} | {pred_warm} | {pred_probes} | {pred_prewarm} |
 
+## Headline: window-start user-facing failures (14:00–14:05)
+
+| Mode | User-Facing Failures |
+|---|---:|
+| Reactive | {uf(win_r)} |
+| Circuit breaker | {uf(win_c)} |
+| Predictive | {uf(win_p)} |
+
 ## Additional scenarios
 
 | Scenario | Metric | Value |
 |---|---|---|
-| window-start (predictive) | user-facing failures (14:00–14:05) | {uf(win_p)} |
 | pattern-shift-h14 (predictive) | backup selections | {fmt(shift14['mean_backup_selections'], shift14['sd_backup_selections'])} |
 | pattern-shift-h15 (predictive) | user-facing failures | {uf(shift15)} |
 | reuse-off (predictive) | physical connects | {fmt(reuse_off['mean_physical_connects'], reuse_off['sd_physical_connects'])} |
-| reuse-on (predictive) | physical connects | {fmt(reuse_on['mean_physical_connects'], reuse_on['sd_physical_connects'])} |
+| reuse-on (predictive) | physical connects / mean latency | {fmt(reuse_on['mean_physical_connects'], reuse_on['sd_physical_connects'])} / {fmt(reuse_on['mean_latency_sim_ms'], reuse_on['sd_latency_sim_ms'], 2)} ms |
 | morning-healthy backup share | predictive vs CB | {morn_p_backup} vs {morn_c_backup} |
 
 ## Protocol
-7-day live learning → day-8 measure; seeded Random 1..{n}; no answer-seeding; routing experiments reuseEnabled=false; recoveryProbeSeconds=30; identical backgroundTick cadence; simulated latency (no sleep).
+7-day live learning → day-8 chronological measure (morning → window-start → bad-window → evening) with monotonic-clock assertion; seeded Random 1..{n}; no answer-seeding; routing experiments reuseEnabled=false; recoveryProbeSeconds=30; identical backgroundTick cadence; simulated latency (no sleep); idle-pool reuse hits = 0 ms. Windows: morning/evening/pattern-shift **30 min @ 1 req/18 s (100)**; bad-window **100 @ 1 req/s**; window-start **13:55–14:10 @ 1 req/5 s** (UF failures = metrics delta in 14:00–14:05).
 
 ## Stack notes
 Swing (not JavaFX); Spring-compatible lifecycle class (not Spring); real IdleConnectionPool reuse; recovery probes; routing = score OR hot-hour (EWMA) OR live cluster OR reset prediction.
