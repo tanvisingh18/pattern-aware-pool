@@ -54,14 +54,17 @@ public final class ExperimentRunner {
             long recoveryProbesFail,
             long backgroundPreWarmConnects,
             long physicalConnects,
-            double meanCheckoutLatencySimMs) {}
+            double meanCheckoutLatencySimMs,
+            double p95CheckoutLatencySimMs) {}
 
     public record SummaryRow(
             String mode,
             String scenario,
             int n,
-            double meanConnectFailures,
-            double sdConnectFailures,
+            double meanUserFacingFailures,
+            double sdUserFacingFailures,
+            double meanPrimaryConnectAttempts,
+            double sdPrimaryConnectAttempts,
             double meanSuccessRate,
             double sdSuccessRate,
             double meanBackupSelections,
@@ -70,8 +73,18 @@ public final class ExperimentRunner {
             double sdPreemptiveFailovers,
             double meanWarmHits,
             double sdWarmHits,
+            double meanRecoveryProbesOk,
+            double sdRecoveryProbesOk,
+            double meanRecoveryProbesFail,
+            double sdRecoveryProbesFail,
+            double meanBackgroundPreWarmConnects,
+            double sdBackgroundPreWarmConnects,
+            double meanPhysicalConnects,
+            double sdPhysicalConnects,
             double meanLatencySimMs,
-            double sdLatencySimMs) {}
+            double sdLatencySimMs,
+            double meanP95LatencySimMs,
+            double sdP95LatencySimMs) {}
 
     public static void main(String[] args) throws Exception {
         int seeds = DEFAULT_SEEDS;
@@ -267,14 +280,9 @@ public final class ExperimentRunner {
                 m.recoveryProbesFail(),
                 m.preWarmEvents(),
                 m.physicalConnects(),
-                m.averageLatencyMs());
+                m.averageLatencyMs(),
+                m.p95LatencyMs());
     }
-
-    /**
-     * Audit-reproduced targets from the pre-fix ExperimentRunner that
-     * directly seeded day patterns into FailureHistoryStore (not an honest
-     * learn-then-measure run). Kept for before/after comparison only.
-     */
 
     /** 13:55–14:10 @ 1 req/5s; userFacingConnectFailures = failures in 14:00–14:05 only. */
     private static ResultRow measureWindowStart(
@@ -302,7 +310,7 @@ public final class ExperimentRunner {
         return new ResultRow(seed, mode, "window-start", requests, m.successRate(),
                 fail1400to1405, m.primaryConnectAttempts(), backup,
                 m.preemptiveFailovers(), m.warmHits(), m.recoveryProbesOk(), m.recoveryProbesFail(),
-                m.preWarmEvents(), m.physicalConnects(), m.averageLatencyMs());
+                m.preWarmEvents(), m.physicalConnects(), m.averageLatencyMs(), m.p95LatencyMs());
     }
 
     /** Healthy-hour reuse on vs off (1000 requests each). */
@@ -378,7 +386,7 @@ public final class ExperimentRunner {
 
     static void writeBeforeFixesBaseline(Path path) throws IOException {
         String csv = """
-                # before_fixes.csv — curated audit targets removed.
+                # before_fixes.csv — curated baseline removed.
                 # See FIXES.md for the measured remediation table.
                 note,value
                 status,removed_curated_baseline
@@ -404,6 +412,8 @@ public final class ExperimentRunner {
                     g.size(),
                     mean(g, r -> r.userFacingConnectFailures()),
                     sd(g, r -> r.userFacingConnectFailures()),
+                    mean(g, r -> r.primaryConnectAttempts()),
+                    sd(g, r -> r.primaryConnectAttempts()),
                     mean(g, r -> r.successRate()),
                     sd(g, r -> r.successRate()),
                     mean(g, r -> r.backupSelections()),
@@ -412,8 +422,18 @@ public final class ExperimentRunner {
                     sd(g, r -> r.preemptiveFailovers()),
                     mean(g, r -> r.warmHits()),
                     sd(g, r -> r.warmHits()),
+                    mean(g, r -> r.recoveryProbesOk()),
+                    sd(g, r -> r.recoveryProbesOk()),
+                    mean(g, r -> r.recoveryProbesFail()),
+                    sd(g, r -> r.recoveryProbesFail()),
+                    mean(g, r -> r.backgroundPreWarmConnects()),
+                    sd(g, r -> r.backgroundPreWarmConnects()),
+                    mean(g, r -> r.physicalConnects()),
+                    sd(g, r -> r.physicalConnects()),
                     mean(g, r -> r.meanCheckoutLatencySimMs()),
-                    sd(g, r -> r.meanCheckoutLatencySimMs())));
+                    sd(g, r -> r.meanCheckoutLatencySimMs()),
+                    mean(g, r -> r.p95CheckoutLatencySimMs()),
+                    sd(g, r -> r.p95CheckoutLatencySimMs())));
         }
         return out;
     }
@@ -448,7 +468,7 @@ public final class ExperimentRunner {
         sb.append("seed,mode,scenario,requests,success_rate,user_facing_connect_failures,")
                 .append("primary_connect_attempts,backup_selections,preemptive_failovers,warm_hits,")
                 .append("recovery_probes_ok,recovery_probes_fail,background_prewarm_connects,")
-                .append("physical_connects,mean_checkout_latency_sim_ms\n");
+                .append("physical_connects,mean_checkout_latency_sim_ms,p95_checkout_latency_sim_ms\n");
         for (ResultRow r : rows) {
             sb.append(r.seed()).append(',')
                     .append(r.mode()).append(',')
@@ -464,7 +484,8 @@ public final class ExperimentRunner {
                     .append(r.recoveryProbesFail()).append(',')
                     .append(r.backgroundPreWarmConnects()).append(',')
                     .append(r.physicalConnects()).append(',')
-                    .append(String.format(Locale.US, "%.3f", r.meanCheckoutLatencySimMs())).append('\n');
+                    .append(String.format(Locale.US, "%.3f", r.meanCheckoutLatencySimMs())).append(',')
+                    .append(String.format(Locale.US, "%.3f", r.p95CheckoutLatencySimMs())).append('\n');
         }
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
         System.out.println("Wrote " + path.toAbsolutePath());
@@ -473,18 +494,26 @@ public final class ExperimentRunner {
     private static void writeSummaryCsv(Path path, List<SummaryRow> rows) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("mode,scenario,n,")
-                .append("mean_connect_failures,sd_connect_failures,")
+                .append("mean_user_facing_failures,sd_user_facing_failures,")
+                .append("mean_primary_connect_attempts,sd_primary_connect_attempts,")
                 .append("mean_success_rate,sd_success_rate,")
                 .append("mean_backup_selections,sd_backup_selections,")
                 .append("mean_preemptive_failovers,sd_preemptive_failovers,")
                 .append("mean_warm_hits,sd_warm_hits,")
-                .append("mean_latency_sim_ms,sd_latency_sim_ms\n");
+                .append("mean_recovery_probes_ok,sd_recovery_probes_ok,")
+                .append("mean_recovery_probes_fail,sd_recovery_probes_fail,")
+                .append("mean_background_prewarm_connects,sd_background_prewarm_connects,")
+                .append("mean_physical_connects,sd_physical_connects,")
+                .append("mean_latency_sim_ms,sd_latency_sim_ms,")
+                .append("mean_p95_latency_sim_ms,sd_p95_latency_sim_ms\n");
         for (SummaryRow r : rows) {
             sb.append(r.mode()).append(',')
                     .append(r.scenario()).append(',')
                     .append(r.n()).append(',')
-                    .append(fmt(r.meanConnectFailures())).append(',')
-                    .append(fmt(r.sdConnectFailures())).append(',')
+                    .append(fmt(r.meanUserFacingFailures())).append(',')
+                    .append(fmt(r.sdUserFacingFailures())).append(',')
+                    .append(fmt(r.meanPrimaryConnectAttempts())).append(',')
+                    .append(fmt(r.sdPrimaryConnectAttempts())).append(',')
                     .append(fmt(r.meanSuccessRate())).append(',')
                     .append(fmt(r.sdSuccessRate())).append(',')
                     .append(fmt(r.meanBackupSelections())).append(',')
@@ -493,8 +522,18 @@ public final class ExperimentRunner {
                     .append(fmt(r.sdPreemptiveFailovers())).append(',')
                     .append(fmt(r.meanWarmHits())).append(',')
                     .append(fmt(r.sdWarmHits())).append(',')
+                    .append(fmt(r.meanRecoveryProbesOk())).append(',')
+                    .append(fmt(r.sdRecoveryProbesOk())).append(',')
+                    .append(fmt(r.meanRecoveryProbesFail())).append(',')
+                    .append(fmt(r.sdRecoveryProbesFail())).append(',')
+                    .append(fmt(r.meanBackgroundPreWarmConnects())).append(',')
+                    .append(fmt(r.sdBackgroundPreWarmConnects())).append(',')
+                    .append(fmt(r.meanPhysicalConnects())).append(',')
+                    .append(fmt(r.sdPhysicalConnects())).append(',')
                     .append(fmt(r.meanLatencySimMs())).append(',')
-                    .append(fmt(r.sdLatencySimMs())).append('\n');
+                    .append(fmt(r.sdLatencySimMs())).append(',')
+                    .append(fmt(r.meanP95LatencySimMs())).append(',')
+                    .append(fmt(r.sdP95LatencySimMs())).append('\n');
         }
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
         System.out.println("Wrote " + path.toAbsolutePath());
@@ -503,30 +542,48 @@ public final class ExperimentRunner {
     private static void writeSummaryMd(
             Path path, List<SummaryRow> rows, int seeds, double elapsedSec) throws IOException {
         StringBuilder sb = new StringBuilder();
-        sb.append("# Experiment Summary (honest protocol)\n\n");
+        sb.append("# Experiment Summary (learn-then-measure)\n\n");
         sb.append("- Seeds: **").append(seeds).append("** (Random seeds 1..").append(seeds).append(")\n");
         sb.append("- Learning: ").append(LEARNING_DAYS)
                 .append(" days × 24h × ").append(REQUESTS_PER_HOUR)
                 .append(" req/h via live FlakyEndpointConnector (no answer-seeding)\n");
-        sb.append("- Measurement: day 8 windows; `reuseEnabled=false`; latency = simulated ms (no sleep)\n");
+        sb.append("- Measurement: day 8 windows; routing experiments use `reuseEnabled=false`; ")
+                .append("latency = simulated ms (no sleep)\n");
         sb.append("- Modes: reactive, circuit_breaker (open after 3 primary fails / 60s / half-open probe), predictive\n");
+        sb.append("- recoveryProbeSeconds=30; backgroundTick cadence identical across modes\n");
         sb.append(String.format(Locale.US, "- Wall time: %.1fs%n%n", elapsedSec));
-        sb.append("| Mode | Scenario | n | Connect Failures (mean±sd) | Success Rate | Preemptive Failovers | Warm Hits | Backup Sel | Latency sim ms |\n");
-        sb.append("|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        sb.append("| Mode | Scenario | n | User-Facing Failures | Primary Connects | Success | ")
+                .append("Probes ok/fail | Prewarm | Physical | Preemptive FO | Warm | Backup | Latency mean/p95 |\n");
+        sb.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for (SummaryRow r : rows) {
             sb.append("| ").append(r.mode())
                     .append(" | ").append(r.scenario())
                     .append(" | ").append(r.n())
-                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanConnectFailures(), r.sdConnectFailures()))
-                    .append(" | ").append(String.format(Locale.US, "%.1f%%±%.1f", r.meanSuccessRate() * 100, r.sdSuccessRate() * 100))
-                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanPreemptiveFailovers(), r.sdPreemptiveFailovers()))
-                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanWarmHits(), r.sdWarmHits()))
-                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f", r.meanBackupSelections(), r.sdBackupSelections()))
-                    .append(" | ").append(String.format(Locale.US, "%.0f±%.0f", r.meanLatencySimMs(), r.sdLatencySimMs()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanUserFacingFailures(), r.sdUserFacingFailures()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanPrimaryConnectAttempts(), r.sdPrimaryConnectAttempts()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f%%±%.1f",
+                            r.meanSuccessRate() * 100, r.sdSuccessRate() * 100))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f / %.1f±%.1f",
+                            r.meanRecoveryProbesOk(), r.sdRecoveryProbesOk(),
+                            r.meanRecoveryProbesFail(), r.sdRecoveryProbesFail()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanBackgroundPreWarmConnects(), r.sdBackgroundPreWarmConnects()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanPhysicalConnects(), r.sdPhysicalConnects()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanPreemptiveFailovers(), r.sdPreemptiveFailovers()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanWarmHits(), r.sdWarmHits()))
+                    .append(" | ").append(String.format(Locale.US, "%.1f±%.1f",
+                            r.meanBackupSelections(), r.sdBackupSelections()))
+                    .append(" | ").append(String.format(Locale.US, "%.0f±%.0f / %.0f±%.0f",
+                            r.meanLatencySimMs(), r.sdLatencySimMs(),
+                            r.meanP95LatencySimMs(), r.sdP95LatencySimMs()))
                     .append(" |\n");
         }
-        sb.append("\nCompare to `before_fixes.csv` (audit seeded-history targets). ")
-                .append("Numbers here are measured — not curated.\n");
+        sb.append("\nSee `FIXES.md` for the remediation history. Numbers here are measured mean±sd.\n");
         Files.writeString(path, sb.toString(), StandardCharsets.UTF_8);
         System.out.println("Wrote " + path.toAbsolutePath());
     }
@@ -536,15 +593,22 @@ public final class ExperimentRunner {
     }
 
     private static void printSummary(List<SummaryRow> rows) {
-        System.out.println("\n=== Honest Experiment Summary ===");
+        System.out.println("\n=== Experiment Summary ===");
         for (SummaryRow r : rows) {
             System.out.printf(Locale.US,
-                    "%-16s %-16s fail=%.1f±%.1f success=%.1f%% failover=%.1f warm=%.1f%n",
+                    "%-16s %-18s uf_fail=%.1f±%.1f primary=%.1f±%.1f success=%.1f%% "
+                            + "probes=%.1f/%.1f prewarm=%.1f physical=%.1f failover=%.1f warm=%.1f%n",
                     r.mode(),
                     r.scenario(),
-                    r.meanConnectFailures(),
-                    r.sdConnectFailures(),
+                    r.meanUserFacingFailures(),
+                    r.sdUserFacingFailures(),
+                    r.meanPrimaryConnectAttempts(),
+                    r.sdPrimaryConnectAttempts(),
                     r.meanSuccessRate() * 100,
+                    r.meanRecoveryProbesOk(),
+                    r.meanRecoveryProbesFail(),
+                    r.meanBackgroundPreWarmConnects(),
+                    r.meanPhysicalConnects(),
                     r.meanPreemptiveFailovers(),
                     r.meanWarmHits());
         }

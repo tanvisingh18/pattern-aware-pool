@@ -1,4 +1,4 @@
-# before_fixes.csv — curated audit targets removed.
+# before_fixes.csv — curated baseline removed.
 # See FIXES.md for the measured remediation table.
 note,value
 status,removed_curated_baseline

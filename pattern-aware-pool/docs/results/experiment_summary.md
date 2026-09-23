@@ -1,36 +1,37 @@
-# Experiment Summary (honest protocol)
+# Experiment Summary (learn-then-measure)
 
 - Seeds: **30** (Random seeds 1..30)
 - Learning: 7 days × 24h × 12 req/h via live FlakyEndpointConnector (no answer-seeding)
-- Measurement: day 8 windows; `reuseEnabled=false`; latency = simulated ms (no sleep)
+- Measurement: day 8 windows; routing experiments use `reuseEnabled=false`; latency = simulated ms (no sleep)
 - Modes: reactive, circuit_breaker (open after 3 primary fails / 60s / half-open probe), predictive
-- Wall time: 101.6s
+- recoveryProbeSeconds=30; backgroundTick cadence identical across modes
+- Wall time: 67.4s
 
-| Mode | Scenario | n | Connect Failures (mean±sd) | Success Rate | Preemptive Failovers | Warm Hits | Backup Sel | Latency sim ms |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| reactive | morning-healthy | 30 | 19.3±6.5 | 99.8%±0.4 | 0.0±0.0 | 0.0±0.0 | 18.8±6.3 | 24±0 |
-| reactive | bad-window | 30 | 85.9±4.0 | 98.9%±1.0 | 0.0±0.0 | 0.0±0.0 | 83.7±3.5 | 21±0 |
-| reactive | evening-stable | 30 | 15.1±5.3 | 99.8%±0.5 | 0.0±0.0 | 0.0±0.0 | 14.7±5.4 | 24±0 |
-| reactive | window-start | 30 | 0.5±0.6 | 99.4%±0.5 | 0.0±0.0 | 0.0±0.0 | 110.4±6.6 | 22±0 |
-| reactive | reuse-off | 30 | 10.7±3.1 | 100.0%±0.0 | 0.0±0.0 | 0.0±0.0 | 10.5±3.2 | 20±0 |
-| reactive | reuse-on | 30 | 0.0±0.0 | 100.0%±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 |
-| reactive | pattern-shift-h14 | 30 | 14.7±5.2 | 99.9%±0.3 | 0.0±0.0 | 0.0±0.0 | 14.6±5.2 | 24±0 |
-| reactive | pattern-shift-h15 | 30 | 78.1±3.2 | 98.8%±1.2 | 0.0±0.0 | 0.0±0.0 | 76.0±2.6 | 21±0 |
-| circuit_breaker | morning-healthy | 30 | 5.4±1.1 | 98.9%±1.0 | 0.0±0.0 | 0.0±0.0 | 88.8±12.1 | 21±1 |
-| circuit_breaker | bad-window | 30 | 3.2±1.1 | 99.0%±0.9 | 0.0±0.0 | 0.0±0.0 | 99.9±0.6 | 20±0 |
-| circuit_breaker | evening-stable | 30 | 5.0±1.4 | 99.4%±0.8 | 0.0±0.0 | 0.0±0.0 | 50.8±21.4 | 22±1 |
-| circuit_breaker | window-start | 30 | 0.5±0.6 | 99.2%±0.6 | 0.0±0.0 | 0.0±0.0 | 177.8±9.9 | 20±0 |
-| circuit_breaker | reuse-off | 30 | 10.7±3.1 | 100.0%±0.0 | 0.0±0.0 | 0.0±0.0 | 10.6±3.1 | 20±0 |
-| circuit_breaker | reuse-on | 30 | 0.0±0.0 | 100.0%±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 |
-| circuit_breaker | pattern-shift-h14 | 30 | 5.5±1.0 | 99.3%±0.8 | 0.0±0.0 | 0.0±0.0 | 60.1±24.1 | 22±1 |
-| circuit_breaker | pattern-shift-h15 | 30 | 3.9±2.0 | 98.8%±1.3 | 0.0±0.0 | 0.0±0.0 | 89.5±1.0 | 20±0 |
-| predictive | morning-healthy | 30 | 2.9±0.8 | 100.0%±0.0 | 77.6±14.5 | 77.6±14.5 | 80.5±14.0 | 5±4 |
-| predictive | bad-window | 30 | 0.8±0.7 | 100.0%±0.0 | 99.2±0.8 | 99.2±0.8 | 100.0±0.2 | 0±0 |
-| predictive | evening-stable | 30 | 3.2±1.4 | 100.0%±0.2 | 52.2±21.0 | 52.2±21.0 | 55.3±20.1 | 9±6 |
-| predictive | window-start | 30 | 0.0±0.0 | 100.0%±0.0 | 175.0±15.0 | 175.0±15.0 | 175.5±13.8 | 1±2 |
-| predictive | reuse-off | 30 | 10.8±3.2 | 100.0%±0.0 | 0.0±0.2 | 0.0±0.0 | 10.6±3.2 | 20±0 |
-| predictive | reuse-on | 30 | 0.0±0.0 | 100.0%±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 |
-| predictive | pattern-shift-h14 | 30 | 2.5±1.3 | 99.9%±0.3 | 72.4±15.2 | 72.4±15.2 | 74.8±14.2 | 5±4 |
-| predictive | pattern-shift-h15 | 30 | 0.7±0.8 | 100.0%±0.0 | 89.1±1.3 | 89.1±1.3 | 89.8±0.6 | 0±0 |
+| Mode | Scenario | n | User-Facing Failures | Primary Connects | Success | Probes ok/fail | Prewarm | Physical | Preemptive FO | Warm | Backup | Latency mean/p95 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| reactive | morning-healthy | 30 | 19.3±6.5 | 80.9±6.4 | 99.8%±0.4 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 99.8±0.4 | 0.0±0.0 | 0.0±0.0 | 18.8±6.3 | 24±0 / 25±0 |
+| reactive | bad-window | 30 | 85.9±4.0 | 15.2±3.6 | 98.9%±1.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 98.9±1.0 | 0.0±0.0 | 0.0±0.0 | 83.7±3.5 | 21±0 / 25±0 |
+| reactive | evening-stable | 30 | 15.1±5.3 | 65.1±5.3 | 99.8%±0.5 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 79.8±0.4 | 0.0±0.0 | 0.0±0.0 | 14.7±5.4 | 24±0 / 25±0 |
+| reactive | window-start | 30 | 0.5±0.6 | 69.6±6.5 | 99.4%±0.5 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 180.0±1.0 | 0.0±0.0 | 0.0±0.0 | 110.4±6.6 | 22±0 / 25±0 |
+| reactive | reuse-off | 30 | 10.7±3.1 | 989.4±3.1 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 999.9±0.3 | 0.0±0.0 | 0.0±0.0 | 10.5±3.2 | 20±0 / 20±0 |
+| reactive | reuse-on | 30 | 0.0±0.0 | 1.0±0.0 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 1.0±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 / 20±0 |
+| reactive | pattern-shift-h14 | 30 | 14.7±5.2 | 75.3±5.2 | 99.9%±0.3 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 89.9±0.3 | 0.0±0.0 | 0.0±0.0 | 14.6±5.2 | 24±0 / 25±0 |
+| reactive | pattern-shift-h15 | 30 | 78.1±3.2 | 12.9±2.7 | 98.8%±1.2 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 88.9±1.0 | 0.0±0.0 | 0.0±0.0 | 76.0±2.6 | 21±0 / 25±0 |
+| circuit_breaker | morning-healthy | 30 | 5.4±1.1 | 11.2±12.1 | 98.9%±1.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 98.9±1.0 | 0.0±0.0 | 0.0±0.0 | 88.8±12.1 | 21±1 / 23±3 |
+| circuit_breaker | bad-window | 30 | 3.2±1.1 | 0.1±0.6 | 99.0%±0.9 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 99.0±0.9 | 0.0±0.0 | 0.0±0.0 | 99.9±0.6 | 20±0 / 20±0 |
+| circuit_breaker | evening-stable | 30 | 5.0±1.4 | 29.2±21.4 | 99.4%±0.8 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 79.5±0.6 | 0.0±0.0 | 0.0±0.0 | 50.8±21.4 | 22±1 / 25±2 |
+| circuit_breaker | window-start | 30 | 0.5±0.6 | 3.2±9.9 | 99.2%±0.6 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 179.6±1.1 | 0.0±0.0 | 0.0±0.0 | 177.8±9.9 | 20±0 / 21±2 |
+| circuit_breaker | reuse-off | 30 | 10.7±3.1 | 989.4±3.1 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 999.9±0.3 | 0.0±0.0 | 0.0±0.0 | 10.6±3.1 | 20±0 / 20±0 |
+| circuit_breaker | reuse-on | 30 | 0.0±0.0 | 1.0±0.0 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 1.0±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 / 20±0 |
+| circuit_breaker | pattern-shift-h14 | 30 | 5.5±1.0 | 29.9±24.1 | 99.3%±0.8 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 89.4±0.7 | 0.0±0.0 | 0.0±0.0 | 60.1±24.1 | 22±1 / 25±2 |
+| circuit_breaker | pattern-shift-h15 | 30 | 3.9±2.0 | 0.5±1.0 | 98.8%±1.3 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 88.9±1.1 | 0.0±0.0 | 0.0±0.0 | 89.5±1.0 | 20±0 / 20±1 |
+| predictive | morning-healthy | 30 | 2.9±0.8 | 19.5±14.0 | 100.0%±0.0 | 1.1±0.6 / 2.1±0.3 | 76.7±14.6 | 22.4±14.5 | 77.6±14.5 | 77.6±14.5 | 80.5±14.0 | 5±4 / 24±5 |
+| predictive | bad-window | 30 | 0.8±0.7 | 0.0±0.2 | 100.0%±0.0 | 0.6±0.7 / 3.4±0.7 | 98.5±0.7 | 0.8±0.8 | 99.2±0.8 | 99.2±0.8 | 100.0±0.2 | 0±0 / 0±0 |
+| predictive | evening-stable | 30 | 3.2±1.4 | 24.7±20.2 | 100.0%±0.2 | 0.9±0.3 / 1.8±0.6 | 52.3±20.9 | 27.8±21.1 | 52.2±21.0 | 52.2±21.0 | 55.3±20.1 | 9±6 / 22±9 |
+| predictive | window-start | 30 | 0.0±0.0 | 5.5±13.8 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 174.9±15.1 | 6.0±15.0 | 175.0±15.0 | 175.0±15.0 | 175.5±13.8 | 1±2 / 4±9 |
+| predictive | reuse-off | 30 | 10.8±3.2 | 989.3±3.2 | 100.0%±0.0 | 0.1±0.3 / 0.0±0.0 | 1.1±2.8 | 999.9±0.3 | 0.0±0.2 | 0.0±0.0 | 10.6±3.2 | 20±0 / 20±0 |
+| predictive | reuse-on | 30 | 0.0±0.0 | 1.0±0.0 | 100.0%±0.0 | 0.0±0.0 / 0.0±0.0 | 0.0±0.0 | 1.0±0.0 | 0.0±0.0 | 0.0±0.0 | 0.0±0.0 | 20±0 / 20±0 |
+| predictive | pattern-shift-h14 | 30 | 2.5±1.3 | 15.2±14.2 | 99.9%±0.3 | 1.5±0.9 / 1.4±0.8 | 71.5±15.2 | 17.5±15.2 | 72.4±15.2 | 72.4±15.2 | 74.8±14.2 | 5±4 / 19±11 |
+| predictive | pattern-shift-h15 | 30 | 0.7±0.8 | 0.2±0.6 | 100.0%±0.0 | 0.3±0.5 / 2.7±0.5 | 89.1±1.3 | 0.9±1.3 | 89.1±1.3 | 89.1±1.3 | 89.8±0.6 | 0±0 / 1±4 |
 
-Compare to `before_fixes.csv` (audit seeded-history targets). Numbers here are measured — not curated.
+See `FIXES.md` for the remediation history. Numbers here are measured mean±sd.

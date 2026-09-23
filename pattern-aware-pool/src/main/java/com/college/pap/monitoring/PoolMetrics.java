@@ -1,14 +1,17 @@
 package com.college.pap.monitoring;
 
-import com.college.pap.model.EndpointId;
 import com.college.pap.routing.RoutingDecision;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
-/** In-memory observability counters for demos, experiments, and RMI/JavaFX. */
+/** In-memory observability counters for demos, experiments, and RMI. */
 public final class PoolMetrics {
     private final LongAdder totalRequests = new LongAdder();
     private final LongAdder successfulCheckouts = new LongAdder();
@@ -26,6 +29,7 @@ public final class PoolMetrics {
     private final LongAdder primaryConnectAttempts = new LongAdder();
     private final LongAdder reuseHits = new LongAdder();
     private final AtomicLong totalCheckoutLatencyMs = new AtomicLong();
+    private final ConcurrentLinkedQueue<Long> checkoutLatenciesMs = new ConcurrentLinkedQueue<>();
     private final Map<String, LongAdder> selectedEndpointCounts = new ConcurrentHashMap<>();
 
     public void recordConnectFailure() {
@@ -54,7 +58,9 @@ public final class PoolMetrics {
 
     public void recordCheckout(RoutingDecision decision, boolean success, boolean usedWarm, long latencyMs) {
         totalRequests.increment();
-        totalCheckoutLatencyMs.addAndGet(Math.max(0, latencyMs));
+        long lat = Math.max(0, latencyMs);
+        totalCheckoutLatencyMs.addAndGet(lat);
+        checkoutLatenciesMs.add(lat);
         if (success) {
             successfulCheckouts.increment();
         } else {
@@ -154,6 +160,17 @@ public final class PoolMetrics {
         return total == 0 ? 0.0 : (double) totalCheckoutLatencyMs.get() / total;
     }
 
+    /** Approximate p95 of recorded checkout latencies (simulated or wall). */
+    public double p95LatencyMs() {
+        List<Long> samples = new ArrayList<>(checkoutLatenciesMs);
+        if (samples.isEmpty()) {
+            return 0.0;
+        }
+        Collections.sort(samples);
+        int idx = (int) Math.ceil(0.95 * samples.size()) - 1;
+        return samples.get(Math.max(0, Math.min(idx, samples.size() - 1)));
+    }
+
     public Map<String, Long> selectedEndpointCounts() {
         Map<String, Long> copy = new ConcurrentHashMap<>();
         selectedEndpointCounts.forEach((k, v) -> copy.put(k, v.sum()));
@@ -194,6 +211,7 @@ public final class PoolMetrics {
         primaryConnectAttempts.reset();
         reuseHits.reset();
         totalCheckoutLatencyMs.set(0);
+        checkoutLatenciesMs.clear();
         selectedEndpointCounts.clear();
     }
 }
