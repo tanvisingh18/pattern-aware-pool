@@ -13,7 +13,6 @@ import com.college.pap.routing.EndpointRegistry;
 import com.college.pap.routing.RoutingDecision;
 import com.college.pap.util.MutableClock;
 
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
@@ -34,24 +33,28 @@ public final class FullSystemDemo {
 
         Map<EndpointId, EndpointConnector> connectors = new LinkedHashMap<>();
         connectors.put(primary, FlakyEndpointConnector.forTests(
-                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock));
+                primary, FlakyEndpointConnector.PatternConfig.primaryFlaky(), clock, new java.util.Random(42)));
         connectors.put(backup, FlakyEndpointConnector.forTests(
-                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock));
+                backup, FlakyEndpointConnector.PatternConfig.healthyBackup(), clock, new java.util.Random(43)));
 
         PoolConfig config = new PoolConfig();
+        config.setZoneId(ZoneOffset.UTC);
+        config.setReuseEnabled(false);
         config.setPreWarmLeadMinutes(15);
         config.setWarmPoolSize(5);
         config.setAnalyzerPeriodSeconds(3600);
         config.setPreWarmPeriodSeconds(3600);
+        config.setRecoveryProbeSeconds(5);
 
-        try (ConnectionPool pool = ConnectionPool.predictive(registry, connectors, config, clock)) {
+        try (ConnectionPool pool = ConnectionPool.predictiveManual(registry, connectors, config, clock)) {
             PoolLifecycle lifecycle = new PoolLifecycle(pool, false, 1099);
             lifecycle.init();
 
             System.out.println("1) Learning phase across 24h...");
             for (int h = 0; h < 24; h++) {
-                for (int i = 0; i < 8; i++) {
-                    clock.set(day.atTime(h, i * 7).toInstant(ZoneOffset.UTC));
+                for (int i = 0; i < 12; i++) {
+                    clock.set(day.atTime(h, Math.min(59, i * 5)).toInstant(ZoneOffset.UTC));
+                    pool.backgroundTick();
                     try (PapConnection ignored = pool.getConnection()) {
                         // learning
                     } catch (Exception ignored) {
@@ -64,18 +67,20 @@ public final class FullSystemDemo {
 
             System.out.println("\n2) Pre-warm check at 13:50 (before bad window)...");
             clock.set(day.atTime(13, 50).toInstant(ZoneOffset.UTC));
-            pool.preWarmer().tick();
+            pool.backgroundTick();
             System.out.println("   Warm pool size : " + pool.preWarmer().warmPool().size());
             System.out.println("   Pre-warm events: " + pool.metrics().preWarmEvents());
 
             System.out.println("\n3) Checkout at 09:15 (healthy hour)...");
             clock.set(day.atTime(9, 15).toInstant(ZoneOffset.UTC));
-            demoCheckout(pool, primary, clock.instant());
+            pool.backgroundTick();
+            demoCheckout(pool, primary);
 
             System.out.println("\n4) Checkout at 14:20 (predicted bad window)...");
             clock.set(day.atTime(14, 20).toInstant(ZoneOffset.UTC));
+            pool.backgroundTick();
             for (int i = 0; i < 5; i++) {
-                demoCheckout(pool, primary, clock.instant());
+                demoCheckout(pool, primary);
             }
 
             System.out.println("\n5) Metrics snapshot:");
@@ -86,7 +91,7 @@ public final class FullSystemDemo {
             lifecycle.destroy();
         }
 
-        System.out.println("\nDemo complete. Next: mvn -q exec:java -Dexec.mainClass=com.college.pap.demo.ExperimentRunner");
+        System.out.println("\nDemo complete. Next: mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner");
     }
 
     private static void printProfiles(ConnectionPool pool) {
@@ -103,16 +108,24 @@ public final class FullSystemDemo {
         }
     }
 
-    private static void demoCheckout(ConnectionPool pool, EndpointId requested, Instant at) {
+    private static void demoCheckout(ConnectionPool pool, EndpointId requested) {
         try (PapConnection c = pool.getConnection(requested)) {
-            RoutingDecision decision = pool.routingDecider().decide(requested, at);
-            for (RiskScore score : decision.allScores().values()) {
-                System.out.println("   " + score);
+            // Print the decision that produced THIS connection — do not recompute.
+            RoutingDecision decision = c.routingDecision().orElse(null);
+            if (decision != null) {
+                for (RiskScore score : decision.allScores().values()) {
+                    System.out.println("   " + score);
+                }
+                System.out.println("   Selected: " + c.endpointId()
+                        + " preWarmed=" + c.isPreWarmed()
+                        + " reason=" + decision.reason()
+                        + " trigger=" + decision.trigger()
+                        + " risk=" + String.format("%.2f", decision.selectedScore().score()));
+            } else {
+                System.out.println("   Selected: " + c.endpointId()
+                        + " preWarmed=" + c.isPreWarmed()
+                        + " (no routing decision attached)");
             }
-            System.out.println("   Selected: " + c.endpointId()
-                    + " preWarmed=" + c.isPreWarmed()
-                    + " decisionHint=" + decision.reason()
-                    + " (live endpoint may differ after recording)");
         } catch (Exception e) {
             System.out.println("   Checkout failed: " + e.getMessage());
         }

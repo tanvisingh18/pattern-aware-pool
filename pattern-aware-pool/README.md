@@ -2,17 +2,38 @@
 
 Advanced Java final-year project — history-aware JDBC connection pool that learns, predicts, reroutes, and pre-warms.
 
-## Deployable (real JDBC) — use this
+## Prerequisites
+
+- JDK 17+ (`JAVA_HOME` pointing at your JDK)
+- Maven 3.9+ on `PATH` (or use a local Maven under `../.tools/`)
 
 ```bash
-export JAVA_HOME="/Library/Java/JavaVirtualMachines/temurin-25.jdk/Contents/Home"
-export PATH="$JAVA_HOME/bin:../.tools/apache-maven-3.9.9/bin:$PATH"
+export JAVA_HOME="…/Contents/Home"   # your JDK 17+ install
+export PATH="$JAVA_HOME/bin:$PATH"
 cd pattern-aware-pool
-mvn test
-mvn -q -Ddemo.mainClass=com.college.pap.demo.RealJdbcDeployDemo exec:java
 ```
 
-Wire your own databases:
+## Build & test
+
+```bash
+mvn test
+```
+
+## Demos
+
+```bash
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.FullSystemDemo
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.ExperimentRunner
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.demo.RealJdbcDeployDemo
+```
+
+Optional Swing monitor:
+
+```bash
+mvn -q exec:java -Ddemo.mainClass=com.college.pap.ui.MonitoringDashboard
+```
+
+## Deployable (real JDBC)
 
 ```java
 ConnectionPool pool = PoolBuilder.create()
@@ -21,15 +42,21 @@ ConnectionPool pool = PoolBuilder.create()
     .buildPredictive();
 
 try (PapConnection c = pool.getConnection()) {
+    // Prefer the decision attached to the connection — do not recompute.
+    c.routingDecision().ifPresent(d ->
+            System.out.println(d.reason() + " / " + d.trigger()));
     java.sql.Connection jdbc = (java.sql.Connection) c.nativeHandle();
-    // use jdbc...
 }
 ```
 
 ## What is real vs optional
+
 - **Real / deployable:** `JdbcEndpointConnector` + `PoolBuilder` via `DriverManager`
-- **Optional simulator:** `FlakyEndpointConnector` only for controlled experiments/paper graphs
+- **Optional simulator:** `FlakyEndpointConnector` for controlled experiments/paper graphs
 - Failures in `RealJdbcDeployDemo` are real TCP connection-refused errors, not mocks
 
 ## Review-2 document
+
 `../Java Submission/Review2_Complete_Research_Paper.docx`
+
+Experiment CSVs: `docs/results/` (copied to `../Java Submission/results/`).

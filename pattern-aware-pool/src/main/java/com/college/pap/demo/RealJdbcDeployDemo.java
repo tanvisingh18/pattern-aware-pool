@@ -1,6 +1,5 @@
 package com.college.pap.demo;
 
-import com.college.pap.model.EndpointId;
 import com.college.pap.pool.ConnectionPool;
 import com.college.pap.pool.EndpointConnector;
 import com.college.pap.pool.PapConnection;
@@ -11,7 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Statement;
-import java.time.Instant;
 
 /**
  * Deployable real-JDBC demo (no flaky simulator).
@@ -90,10 +88,9 @@ public final class RealJdbcDeployDemo {
     }
 
     private static void checkout(ConnectionPool pool, int n) {
-        EndpointId primary = new EndpointId("primary-db");
-        Instant at = Instant.now();
         try (PapConnection pap = pool.getConnection()) {
-            RoutingDecision decision = pool.routingDecider().decide(primary, at);
+            // Print the decision attached to this checkout — do not recompute.
+            RoutingDecision decision = pap.routingDecision().orElse(null);
             Object handle = pap.nativeHandle();
             String jdbcState = "n/a";
             if (handle instanceof Connection jdbc) {
@@ -102,12 +99,19 @@ public final class RealJdbcDeployDemo {
                     jdbcState = rs.next() ? "SELECT ok=" + rs.getBoolean(1) : "empty";
                 }
             }
+            String reason = decision == null ? "?" : decision.reason().name();
+            String trigger = decision == null ? "?" : decision.trigger().name();
+            String risk = decision == null
+                    ? "?"
+                    : String.format("%.2f", decision.selectedScore().score());
             System.out.printf(
-                    "   #%d endpoint=%-10s preWarmed=%-5s reason=%-20s sql=[%s]%n",
+                    "   #%d endpoint=%-10s preWarmed=%-5s reason=%-20s trigger=%-16s risk=%s sql=[%s]%n",
                     n,
                     pap.endpointId(),
                     pap.isPreWarmed(),
-                    decision.reason(),
+                    reason,
+                    trigger,
+                    risk,
                     jdbcState);
         } catch (EndpointConnector.ConnectionFailedException e) {
             System.out.printf("   #%d FAILED: %s (%s)%n", n, e.getMessage(), e.failureType());

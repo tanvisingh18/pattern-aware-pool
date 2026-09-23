@@ -51,7 +51,21 @@ public final class MonitoringDashboard {
                 sb.append(pool.metrics().snapshot()).append("\n\n");
                 sb.append("Warm pool size: ").append(pool.preWarmer().warmPool().size()).append('\n');
                 sb.append("ThreadGroup: ").append(pool.threadFactory().threadGroup().getName()).append("\n\n");
-                sb.append("Endpoint profiles:\n");
+                sb.append("Latest routing (recomputed for display):\n");
+                try {
+                    var decision = pool.routingDecider().decide();
+                    sb.append("  reason=").append(decision.reason())
+                            .append("  trigger=").append(decision.trigger())
+                            .append("  selected=").append(decision.selected())
+                            .append("  risk=")
+                            .append(String.format("%.2f", decision.selectedScore().score()))
+                            .append('\n');
+                    decision.allScores().forEach((id, score) ->
+                            sb.append("  ").append(id).append(" → ").append(score).append('\n'));
+                } catch (RuntimeException e) {
+                    sb.append("  (unavailable: ").append(e.getMessage()).append(")\n");
+                }
+                sb.append("\nEndpoint profiles:\n");
                 pool.analyzer().getAllProfiles().forEach((id, profile) ->
                         sb.append(" - ").append(profile).append('\n'));
                 area.setText(sb.toString());
